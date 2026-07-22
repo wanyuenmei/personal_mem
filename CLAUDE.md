@@ -7,6 +7,11 @@
   titles, or PR descriptions — they age badly and mean nothing to a future
   reader. Name the concrete thing ("the OAuth layer", "the consent layer")
   and use Linear ticket ids (`PER-N`) when you need a pointer.
+- **Don't link Linear documents from repo files.** Keep the repo
+  self-contained — internal planning/strategy lives in Linear docs (Founding
+  Brief, Decision log, Architecture narrative); README, `ARCHITECTURE.md`, and
+  other repo files shouldn't point at them. (PR *descriptions* still link the
+  Linear ticket — that's issue traceability, not a doc link.)
 
 ## Pull requests
 
@@ -36,5 +41,14 @@ CI enforces both: `.github/workflows/pr-title.yml` checks the title format,
 and `.github/workflows/pr-body.yml` (via `.github/scripts/check_pr_body.py`)
 checks the required sections are present and filled in.
 
-<!-- Room to grow: branch naming, test/lint expectations (see CI in
+## Branches & merge state
+
+- **Check a PR's merge state before pushing to its branch.** A merged PR is
+  finished: pushing follow-up commits to its branch strands them (they land
+  after the merge and never reach `main`), and editing a merged PR's body is
+  misleading. Before pushing follow-up work or updating a PR, confirm it's
+  still open; if it has merged, branch fresh from the latest `main` and open a
+  new PR for the follow-up.
+
+<!-- Room to grow: test/lint expectations (see CI in
      .github/workflows/ci.yml and the ruff config in pyproject.toml), etc. -->

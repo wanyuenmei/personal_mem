@@ -9,27 +9,31 @@ Claude something once; Cursor and ChatGPT know it too — and the data lives in 
 store *you* run, not inside any one vendor's silo.
 
 "Sign in with your context" (instant personalization for any new AI app) is
-what this unlocks once trust exists — the destination, not the lead. See
-Decision #9 in the [founding brief](personal-context-layer-brief.md).
+what this unlocks once trust exists — the destination, not the lead.
 
 > Status: working system, private beta of one. Claude, Cursor, and ChatGPT
-> currently share a deployed store. Roadmap lives in the
-> [Linear project](https://linear.app/personal-context-mcp/project/personal-context-layer-99ad394253c2).
+> currently share a deployed store.
 
 ## What's here
 
+One package, one directory per architecture layer (see
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full map + diagram):
+
 ```
 src/context_layer/
-  config.py    # env-driven config: extraction modes, stores, embedders, transport
-  memory.py    # ContextStore over mem0: add/search/all, scope tagging
-  identity.py  # resolve_user_id — the (future OAuth) tenant seam
-  server.py    # MCP server: search_memory/add_memory, stdio + streamable-HTTP,
-               # per-client capability paths + rate limit
+  app.py, __main__.py   # composition root + entrypoint (`python -m context_layer`)
+  config.py             # env-driven settings: extraction modes, stores, embedders, transport
+  transport/            # stdio + streamable-HTTP assembly; /health endpoint
+  auth/                 # capability-path + rate-limit guards; WorkOS OAuth (opt-in)
+  tools/                # the MCP tools: search_memory / add_memory
+  identity/             # resolve_user_id — the tenant seam
+  memory/               # ContextStore over mem0: add/search/all, scope tagging
+  observability/        # structured access/audit log
 scripts/
-  smoke_test.py   # add + search end-to-end without MCP
-  inspect_db.py   # dump everything stored about you (the audit view, in embryo)
-Dockerfile, railway.json, DEPLOY.md   # deploy artifacts (Railway)
-personal-context-layer-brief.md       # founding brief: decisions #1–9, GTM
+  smoke_test.py         # add + search end-to-end without MCP
+  inspect_db.py         # dump everything stored about you (the audit view, in embryo)
+ARCHITECTURE.md    # layer-by-layer map + request-flow diagram
+Dockerfile, railway.json   # deploy artifacts (Railway)
 ```
 
 ## Quickstart (local, 5 minutes)
@@ -70,7 +74,7 @@ depends on a cloud provider.
 "personal-context": {
   "command": "uv",
   "args": ["--directory", "<path-to-this-repo>",
-           "run", "python", "-m", "context_layer.server"]
+           "run", "python", "-m", "context_layer"]
 }
 ```
 
@@ -152,9 +156,31 @@ PUBLIC_SERVER_URL=https://<your-domain>/mcp       # this server's public MCP URL
 
 ## Deploy (Railway)
 
-Full walkthrough: [`DEPLOY.md`](DEPLOY.md). Short version: `railway init` →
-add Postgres (pgvector) → set env vars → `railway up` → generate a domain →
-paste capability URLs into your clients.
+`railway init` from the repo root, then add a **Postgres** service in the
+dashboard — Railway's Postgres ships `pgvector`, and mem0 runs `CREATE EXTENSION
+vector` automatically on first write. Set these env vars on the **app service**:
+
+```
+EXTRACTION_MODE=anthropic
+ANTHROPIC_API_KEY=<your key>                    # server-side secret
+EMBEDDER_PROVIDER=fastembed
+VECTOR_STORE=pgvector
+MCP_TRANSPORT=streamable-http
+DATABASE_URL=${{Postgres.DATABASE_URL}}         # Railway reference to the DB
+CONTEXT_LAYER_TOKENS=claude:<tok>,cursor:<tok>  # per-client capability tokens
+USER_ID=<your-id>                               # single-tenant id (default: mei)
+```
+
+`PORT` is injected automatically. Then `railway up` (builds the Dockerfile), and
+**Settings → Networking → Generate Domain** for a public URL — your MCP endpoint
+is `https://<domain>/<token>/mcp`. Liveness check:
+`curl -s https://<domain>/health` → `ok`. Paste each client's capability URL into
+its connector settings (see above).
+
+**Troubleshooting:** build fails on `mem0ai` → confirm `mem0ai==2.0.12` still
+resolves on PyPI; `CREATE EXTENSION vector` error → the Postgres image lacks
+pgvector, recreate it from a pgvector template; tools error at runtime → check
+`railway logs`, usually a missing `ANTHROPIC_API_KEY` or `DATABASE_URL`.
 
 ## How it works
 
@@ -166,6 +192,11 @@ paste capability URLs into your clients.
                 capability
                 paths)
 ```
+
+For the full request path — transport → auth guards → tools → identity seam →
+memory store → mem0 → vector store — see
+[`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes
+`GET /health` (200, no auth) for liveness/readiness probes.
 
 - **Scopes:** every memory is tagged (`dietary`, `shopping`, `travel`, …) —
   the spine of the future per-scope consent layer.
