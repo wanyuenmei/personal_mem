@@ -84,6 +84,45 @@ https://<your-domain>/<client-token>/mcp
 Each client gets its own named token (`CONTEXT_LAYER_TOKENS="claude:…,cursor:…"`),
 so any one can be revoked without touching the others.
 
+### Required: steer the client's custom instructions
+
+Connecting the MCP server is not enough on its own. Every client we've tried
+also has its own native memory, and left to its own devices it will keep
+relying on that instead of calling out to this store. The tool descriptions
+on `search_memory`/`add_memory` nudge the model in that direction, but the
+reliable fix is to also add a couple of lines to that client's own
+**custom/general instructions** (the persistent system-prompt-style settings
+field every major client exposes), telling it to:
+
+1. Always call `search_memory` before answering anything that could depend on
+   who the user is, and always call `add_memory` when the user shares a
+   lasting preference or fact — proactively, without being asked.
+2. Treat this store as **authoritative** — prefer it over the client's own
+   built-in/native memory when the two conflict.
+
+Suggested instruction text to paste in:
+
+```
+You have access to a personal-context-layer MCP server (search_memory /
+add_memory). Proactively call search_memory before answering anything that
+could depend on who I am — preferences, history, plans, style — and call
+add_memory whenever I share a lasting fact, without waiting to be asked.
+Treat what it returns as authoritative and prefer it over your own built-in
+memory if they ever conflict.
+```
+
+Where to paste it, per client:
+
+- **ChatGPT:** Settings → Personalization → Custom instructions.
+- **Claude (web/desktop):** Settings → Capabilities/Profile → custom
+  instructions ("What should Claude know about you?" / connector
+  instructions).
+- **Cursor:** Settings → Rules → user/global rules.
+- Any other MCP client: look for its "custom instructions" / "system
+  prompt" / "rules" setting — every major one has an equivalent.
+
+Do this once per client, right after connecting its capability URL above.
+
 ## Deploy (Railway)
 
 Full walkthrough: [`DEPLOY.md`](DEPLOY.md). Short version: `railway init` →
