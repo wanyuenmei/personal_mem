@@ -18,6 +18,13 @@ When opening a PR, follow `.github/pull_request_template.md`. Specifically:
   - **Deploy impact** — env/schema/dependency/flag changes, or "None". No
     deploy happens without an explicit go-ahead.
 - Match the template's structure rather than writing an ad-hoc body.
+- **No milestone mentions.** Don't reference internal roadmap milestones
+  (e.g. `M2.2`, `M4`) in the title or description — describe the change on its
+  own terms. Ticket ids (`PER-N`) are fine; milestone shorthand ages badly and
+  means nothing to someone reading the diff later.
+- **Keep descriptions succinct.** Say just enough to review the diff. Put
+  deeper background, rationale, and history in the Linear ticket, not the PR
+  body — link the ticket rather than restating it.
 
 CI enforces both: `.github/workflows/pr-title.yml` checks the title format,
 and `.github/workflows/pr-body.yml` (via `.github/scripts/check_pr_body.py`)
