@@ -1,4 +1,4 @@
-"""WorkOS AuthKit OAuth wiring for the MCP HTTP transport (M2.2).
+"""WorkOS AuthKit OAuth wiring for the MCP HTTP transport.
 
 This makes the deployed server an OAuth 2.0 **Resource Server** (RFC 9728), not
 an Authorization Server. Concretely:

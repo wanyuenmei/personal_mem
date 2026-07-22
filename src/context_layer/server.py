@@ -5,12 +5,12 @@ Transport is env-selected (config.MCP_TRANSPORT):
   - streamable-http          -> remote deploy (Railway), for Claude + ChatGPT connectors
 
 Every tool resolves the caller to a user_id via identity.resolve_user_id(ctx) —
-single-tenant today, the auth seam for M2.2.
+single-tenant today, the auth seam for when OAuth lands.
 
 For the HTTP transport there are now two mutually-exclusive auth modes, chosen
 purely by whether WorkOS is configured (config.workos_enabled()):
 
-1. OAuth Resource Server (M2.2, when WORKOS_* env is set). FastMCP is built with
+1. OAuth Resource Server (when WORKOS_* env is set). FastMCP is built with
    auth settings + a WorkOS token verifier (see auth.py): it publishes
    /.well-known/oauth-protected-resource pointing at the WorkOS AuthKit issuer,
    requires a verified Bearer token on /mcp, and — deliberately — answers 401
@@ -20,7 +20,7 @@ purely by whether WorkOS is configured (config.workos_enabled()):
    (that would 404 the discovery routes and swallow the 401); we keep only the
    rate limit.
 
-2. CAPABILITY PATH (M2.1 stopgap, when WorkOS is unset — the default). The MCP
+2. CAPABILITY PATH (stopgap, when WorkOS is unset — the default). The MCP
    endpoint is served at /<token>/mcp and the URL itself is the credential. Why
    not a bearer header or ?token= query param: connector UIs (Claude web/desktop,
    ChatGPT) can't send custom headers AND strip query strings from connector
@@ -37,7 +37,7 @@ unbounded Anthropic spend.
 
 The tool descriptions deliberately tell the client this store is the user's
 *authoritative* context and should take precedence over the client's own
-memory — the seed of M4 "supersession". We can't disable a client's internal
+memory — the seed of "supersession". We can't disable a client's internal
 memory, only steer precedence through these descriptions.
 """
 

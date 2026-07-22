@@ -1,7 +1,7 @@
 """Thin wrapper around mem0 so the rest of the app never touches mem0 directly.
 
 Every memory carries a `scope` in its metadata from day one. Scopes aren't
-*enforced* yet (that's the M5 consent layer), but modeling them now — as the
+*enforced* yet (that's the future consent layer), but modeling them now — as the
 brief argues, the scope schema is the spine — avoids a painful migration later.
 
 --- Tenant isolation (PER-5) --------------------------------------------------
@@ -19,8 +19,8 @@ one choke point before the call reaches mem0, and raises loudly
 Note this module does NOT default a missing user_id to DEFAULT_USER_ID
 anymore — silently substituting a fallback here would defeat the point of the
 guard (a caller bug would just quietly write to the default tenant instead of
-failing loudly). Callers that want the single-tenant default (e.g. the M1/M2.0
-stdio path via identity.resolve_user_id()) must pass it explicitly.
+failing loudly). Callers that want the single-tenant default (e.g. the stdio
+path via identity.resolve_user_id()) must pass it explicitly.
 
 Per-tenant namespacing (a separate mem0 collection/store per user_id, rather
 than one shared collection filtered by a field) was considered per the ticket

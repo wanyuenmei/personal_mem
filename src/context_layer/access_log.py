@@ -8,8 +8,8 @@ name, scope, and timestamp on every tool call. stdio has no per-client token,
 so those calls log as "stdio".
 
 This is deliberately just structured logging (key=value on one line) rather
-than a dedicated audit datastore — the foundation for the audit dashboard /
-M2.3 work (see PER-13), not that work itself.
+than a dedicated audit datastore — the foundation for the audit dashboard
+(see PER-13), not that work itself.
 """
 
 import logging

@@ -1,7 +1,7 @@
 """The single seam where a caller's identity resolves to a mem0 user_id.
 
-Single-tenant by default (returns DEFAULT_USER_ID). At M2.2, when the WorkOS
-OAuth layer is configured, this is the ONE place that reads the authenticated
+Single-tenant by default (returns DEFAULT_USER_ID). When the WorkOS OAuth
+layer is configured, this is the ONE place that reads the authenticated
 principal off the request context and returns their stable, per-tenant id — so
 tenant isolation lives behind a single, testable function.
 
