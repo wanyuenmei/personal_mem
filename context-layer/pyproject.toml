@@ -1,0 +1,37 @@
+[project]
+name = "context-layer"
+version = "0.1.0"
+description = "User-owned, portable personal context layer over mem0, exposed via MCP."
+requires-python = ">=3.12,<3.14"
+# mem0 is installed from the local clone (../mem0), see requirements.txt / README.
+# mem0ai: locally uv resolves it from the ~/repos/mem0 editable clone via
+# [tool.uv.sources] below; the Docker build uses pip, which ignores uv sources
+# and installs mem0ai==2.0.12 from PyPI (identical version).
+dependencies = [
+    "mem0ai==2.0.12",
+    "mcp>=1.2",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+    "fastembed>=0.4",             # ONNX embedder — light, used for deploy
+    "psycopg[binary,pool]>=3.1",  # pgvector store on deploy
+    "uvicorn>=0.30",              # streamable-http server
+]
+
+[project.optional-dependencies]
+# Local-dev stack (M1 defaults). NOT installed in the deploy image, which runs
+# fastembed + pgvector. Keeps the container free of torch/chromadb.
+local = [
+    "sentence-transformers>=3.0",  # HuggingFace embedder
+    "chromadb>=0.5",               # local embedded vector store
+]
+
+[tool.uv.sources]
+# Local dev only — pip (Docker) ignores this and uses PyPI.
+mem0ai = { path = "/Users/mei/repos/mem0", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/context_layer"]
