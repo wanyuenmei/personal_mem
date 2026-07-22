@@ -12,13 +12,12 @@ store *you* run, not inside any one vendor's silo.
 what this unlocks once trust exists — the destination, not the lead.
 
 > Status: working system, private beta of one. Claude, Cursor, and ChatGPT
-> currently share a deployed store. Roadmap lives in the
-> [Linear project](https://linear.app/personal-context-mcp/project/personal-context-layer-99ad394253c2).
+> currently share a deployed store.
 
 ## What's here
 
 One package, one directory per architecture layer (see
-[`docs/architecture.md`](docs/architecture.md) for the full map + diagram):
+[`ARCHITECTURE.md`](ARCHITECTURE.md) for the full map + diagram):
 
 ```
 src/context_layer/
@@ -33,7 +32,7 @@ src/context_layer/
 scripts/
   smoke_test.py         # add + search end-to-end without MCP
   inspect_db.py         # dump everything stored about you (the audit view, in embryo)
-docs/architecture.md    # layer-by-layer map + request-flow diagram
+ARCHITECTURE.md    # layer-by-layer map + request-flow diagram
 Dockerfile, railway.json   # deploy artifacts (Railway)
 ```
 
@@ -196,7 +195,7 @@ pgvector, recreate it from a pgvector template; tools error at runtime → check
 
 For the full request path — transport → auth guards → tools → identity seam →
 memory store → mem0 → vector store — see
-[`docs/architecture.md`](docs/architecture.md). The server also exposes
+[`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes
 `GET /health` (200, no auth) for liveness/readiness probes.
 
 - **Scopes:** every memory is tagged (`dietary`, `shopping`, `travel`, …) —
