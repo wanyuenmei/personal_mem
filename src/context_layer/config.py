@@ -119,6 +119,59 @@ CONTEXT_LAYER_TOKENS = _parse_tokens()
 # Crude global cap so an exposed endpoint can't run up unbounded Anthropic spend.
 RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "120"))
 
+# --- OAuth multi-tenancy (M2.2, WorkOS AuthKit) -----------------------------
+# ADDITIVE and fully opt-in: when these are UNSET the server behaves exactly as
+# today (CapabilityPathGuard + single-tenant resolve_user_id). When set, the
+# HTTP transport runs as an OAuth 2.0 Resource Server (RFC 9728): FastMCP
+# publishes /.well-known/oauth-protected-resource pointing at the WorkOS AuthKit
+# issuer, connector UIs (Claude/ChatGPT) discover it, register dynamically and
+# sign in AGAINST WORKOS, and every /mcp request must carry a WorkOS-issued
+# Bearer access token that we verify against WorkOS's JWKS.
+#
+# NB: this is the deliberate reversal of the M2.1 "never answer 401" rule — in
+# OAuth mode a 401 with a WWW-Authenticate resource_metadata hint is exactly
+# what makes a connector launch its (now-succeedable) sign-in flow. It only
+# happens when WorkOS is configured; the capability-path deploy is untouched.
+#
+# NEVER hardcode any of these — they are secrets/tenant identifiers supplied at
+# deploy time. See .env.example and the README "Connect an AI client" section.
+WORKOS_CLIENT_ID = os.getenv("WORKOS_CLIENT_ID", "").strip()
+WORKOS_API_KEY = os.getenv("WORKOS_API_KEY", "").strip()
+# The AuthKit issuer URL the connector discovers + signs in against, e.g.
+# https://your-app.authkit.app  (WorkOS Dashboard -> AuthKit -> "AuthKit domain").
+WORKOS_AUTHKIT_DOMAIN = os.getenv("WORKOS_AUTHKIT_DOMAIN", "").strip()
+# WorkOS API base (JWKS lives at {base}/sso/jwks/{client_id}); override only for
+# testing against a non-prod WorkOS environment.
+WORKOS_API_BASE_URL = os.getenv("WORKOS_API_BASE_URL", "https://api.workos.com").strip()
+# The public URL of THIS resource server (its MCP endpoint), e.g.
+# https://your-domain/mcp — used verbatim as the RFC 9728 resource identifier.
+PUBLIC_SERVER_URL = os.getenv("PUBLIC_SERVER_URL", "").strip()
+# Optional: comma/space-separated scopes a token must carry (empty = any valid
+# token is accepted). Also the audience to validate, if your tenant sets `aud`.
+WORKOS_REQUIRED_SCOPES = os.getenv("WORKOS_REQUIRED_SCOPES", "").strip()
+WORKOS_AUDIENCE = os.getenv("WORKOS_AUDIENCE", "").strip()
+# Prefix applied to the token subject to form the mem0 user_id, so authenticated
+# tenants can never collide with the single-tenant DEFAULT_USER_ID namespace.
+WORKOS_USER_ID_PREFIX = os.getenv("WORKOS_USER_ID_PREFIX", "workos_")
+
+
+def workos_required_scopes() -> list[str]:
+    """Required scopes as a list (empty => accept any valid token)."""
+    raw = WORKOS_REQUIRED_SCOPES.replace(",", " ")
+    return [s for s in raw.split() if s]
+
+
+def workos_enabled() -> bool:
+    """True only when the minimum WorkOS OAuth config is present.
+
+    Requires the client id (identifies the JWKS + tenant), the AuthKit issuer
+    (what connectors discover and sign in against), and this server's public URL
+    (the RFC 9728 resource identifier). WORKOS_API_KEY is optional — token
+    verification only needs the public JWKS. Any missing piece => OAuth is off
+    and the server falls back to the capability-path stopgap.
+    """
+    return bool(WORKOS_CLIENT_ID and WORKOS_AUTHKIT_DOMAIN and PUBLIC_SERVER_URL)
+
 
 def infer_enabled() -> bool:
     """Whether mem0 runs LLM fact-extraction on writes."""

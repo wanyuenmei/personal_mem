@@ -2,10 +2,10 @@
 .venv-check/
 .claude/
 __pycache__/
+.pytest_cache/
 *.pyc
 .env
 .context-layer/
 .chroma/
 *.egg-info/
 .DS_Store
-.pytest_cache/
