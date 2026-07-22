@@ -9,6 +9,10 @@ The <ticket> is the Linear issue id (PER-N). Fill in the sections below,
 then delete this comment.
 -->
 
+## Ticket
+<!-- Link to the Linear issue this PR implements, e.g.
+     https://linear.app/personal-context-mcp/issue/PER-7 -->
+
 ## Description
 <!-- What this PR is, in a sentence or two. -->
 

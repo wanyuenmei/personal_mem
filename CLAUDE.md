@@ -8,6 +8,8 @@ When opening a PR, follow `.github/pull_request_template.md`. Specifically:
   Linear issue id (e.g. `PER-7: add tests and tool error handling`). GitHub
   can't enforce this from the template, so it's on the author to match it.
 - **Description** must contain these sections, matching the template:
+  - **Ticket** — a link to the Linear issue (e.g.
+    `https://linear.app/personal-context-mcp/issue/PER-7`).
   - **Description** — what the PR is.
   - **What changed** — the concrete changes.
   - **Why** — motivation / ticket context / trade-offs.
