@@ -21,4 +21,4 @@ RUN python -c "from fastembed import TextEmbedding; TextEmbedding('BAAI/bge-smal
 
 # Railway injects $PORT at runtime; the app reads it (falls back to 8000 locally).
 EXPOSE 8000
-CMD ["python", "-m", "context_layer.server"]
+CMD ["python", "-m", "context_layer"]

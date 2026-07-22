@@ -1,9 +1,9 @@
 """Tests that search_memory/add_memory turn backend failures into friendly
 errors instead of letting mem0/LLM/DB exceptions propagate to the MCP client.
 
-context_layer.server constructs a module-level ContextStore() on import,
-which (unpatched) can try to download a fastembed model from Hugging Face.
-The server_module fixture patches mem0.Memory.from_config out *before*
+context_layer.tools.memory_tools constructs a module-level ContextStore() on
+import, which (unpatched) can try to download a fastembed model from Hugging
+Face. The server_module fixture patches mem0.Memory.from_config out *before*
 importing the module, so import is fully offline.
 """
 
@@ -19,12 +19,12 @@ def server_module(monkeypatch):
 
     monkeypatch.setattr(mem0.Memory, "from_config", lambda cfg: MagicMock())
 
-    sys.modules.pop("context_layer.server", None)
-    from context_layer import server
+    sys.modules.pop("context_layer.tools.memory_tools", None)
+    from context_layer.tools import memory_tools
 
-    yield server
+    yield memory_tools
 
-    sys.modules.pop("context_layer.server", None)
+    sys.modules.pop("context_layer.tools.memory_tools", None)
 
 
 def test_search_memory_returns_friendly_error_on_backend_failure(server_module, monkeypatch):

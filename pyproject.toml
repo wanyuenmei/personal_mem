@@ -15,9 +15,12 @@ dependencies = [
     "fastembed>=0.4",             # ONNX embedder — light, used for deploy
     "psycopg[binary,pool]>=3.1",  # pgvector store on deploy
     "uvicorn>=0.30",              # streamable-http server
-    "workos>=9,<10",              # M2.2 OAuth: WorkOS AuthKit SDK (JWKS/base_url)
-    "pyjwt[crypto]>=2.8",         # M2.2 OAuth: verify WorkOS RS256 access tokens
+    "workos>=9,<10",              # OAuth: WorkOS AuthKit SDK (JWKS/base_url)
+    "pyjwt[crypto]>=2.8",         # OAuth: verify WorkOS RS256 access tokens
 ]
+
+[project.scripts]
+context-layer = "context_layer.app:run"
 
 [project.optional-dependencies]
 # Local-dev stack (the defaults). NOT installed in the deploy image, which runs
