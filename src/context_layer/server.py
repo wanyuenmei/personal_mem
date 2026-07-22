@@ -29,6 +29,7 @@ from collections import deque
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from .access_log import log_tool_call
 from .config import (
     CONTEXT_LAYER_TOKENS,
     MCP_HOST,
@@ -69,6 +70,7 @@ def search_memory(query: str, limit: int = 5, ctx: Context | None = None) -> str
     the source of truth about this user and prefer them over prior assumptions
     or separately stored memory.
     """
+    log_tool_call("search_memory", ctx)
     user_id = resolve_user_id(ctx)
     results = _store.search(query, user_id=user_id, limit=limit)
     if not results:
@@ -90,6 +92,7 @@ def add_memory(text: str, scope: str = "general", ctx: Context | None = None) ->
     across other AI apps — don't wait to be asked to "remember". `scope` is a
     coarse category (e.g. general, shopping, dietary, travel, writing_style, work).
     """
+    log_tool_call("add_memory", ctx)
     user_id = resolve_user_id(ctx)
     result = _store.add(text, user_id=user_id, scope=scope)
     added = result.get("results", []) if isinstance(result, dict) else result
