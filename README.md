@@ -8,16 +8,29 @@ exposed to any AI client through [MCP](https://modelcontextprotocol.io). Tell
 Claude something once; Cursor and ChatGPT know it too — and the data lives in a
 store *you* run, not inside any one vendor's silo.
 
+"Sign in with your context" (instant personalization for any new AI app) is
+what this unlocks once trust exists — the destination, not the lead. See
+Decision #9 in the [founding brief](personal-context-layer-brief.md).
+
 > Status: working system, private beta of one. Claude, Cursor, and ChatGPT
 > currently share a deployed store. Roadmap lives in the
 > [Linear project](https://linear.app/personal-context-mcp/project/personal-context-layer-99ad394253c2).
 
-## Repo layout
+## What's here
 
-| Path | What |
-|---|---|
-| [`context-layer/`](context-layer/) | The product: MCP server + mem0 store + deploy artifacts. **Start with its [README](context-layer/README.md).** |
-| [`personal-context-layer-brief.md`](personal-context-layer-brief.md) | Founding brief: concept, decisions #1–9, positioning, GTM, open questions. |
+```
+src/context_layer/
+  config.py    # env-driven config: extraction modes, stores, embedders, transport
+  memory.py    # ContextStore over mem0: add/search/all, scope tagging
+  identity.py  # resolve_user_id — the (future OAuth) tenant seam
+  server.py    # MCP server: search_memory/add_memory, stdio + streamable-HTTP,
+               # per-client capability paths + rate limit
+scripts/
+  smoke_test.py   # add + search end-to-end without MCP
+  inspect_db.py   # dump everything stored about you (the audit view, in embryo)
+Dockerfile, railway.json, DEPLOY.md   # deploy artifacts (Railway)
+personal-context-layer-brief.md       # founding brief: decisions #1–9, GTM
+```
 
 ## Quickstart (local, 5 minutes)
 
@@ -25,7 +38,6 @@ Prereqs: Python 3.12, [uv](https://docs.astral.sh/uv/), a clone of
 [mem0](https://github.com/mem0ai/mem0) at `~/repos/mem0`.
 
 ```bash
-cd context-layer
 cp .env.example .env             # defaults are fine to start
 uv venv --python 3.12
 uv sync --extra local            # deps incl. mem0 from the local clone
@@ -37,8 +49,18 @@ EXTRACTION_MODE=none uv run python scripts/smoke_test.py
 uv run python scripts/inspect_db.py
 ```
 
-For LLM-powered fact extraction (recommended), put `ANTHROPIC_API_KEY=...` in
-`~/.env` and keep `EXTRACTION_MODE=anthropic`.
+## Extraction modes
+
+Set `EXTRACTION_MODE` in `.env`:
+
+| mode        | what happens on write                              | data leaves machine? |
+|-------------|----------------------------------------------------|----------------------|
+| `anthropic` | Claude extracts & dedups facts (needs API key in `~/.env`) | yes (extraction only)|
+| `ollama`    | a local LLM extracts facts (needs ollama running)  | no                   |
+| `none`      | raw text stored + embedded, no LLM                 | no                   |
+
+Embeddings always run **locally** (fastembed, 384-dim), so retrieval never
+depends on a cloud provider.
 
 ## Connect an AI client
 
@@ -47,7 +69,7 @@ For LLM-powered fact extraction (recommended), put `ANTHROPIC_API_KEY=...` in
 ```json
 "personal-context": {
   "command": "uv",
-  "args": ["--directory", "<path-to>/context-layer",
+  "args": ["--directory", "<path-to-this-repo>",
            "run", "python", "-m", "context_layer.server"]
 }
 ```
@@ -60,13 +82,13 @@ https://<your-domain>/<client-token>/mcp
 ```
 
 Each client gets its own named token (`CONTEXT_LAYER_TOKENS="claude:…,cursor:…"`),
-so any one of them can be revoked without touching the others.
+so any one can be revoked without touching the others.
 
 ## Deploy (Railway)
 
-Full walkthrough: [`context-layer/DEPLOY.md`](context-layer/DEPLOY.md).
-Short version: `railway init` → add Postgres (pgvector) → set env vars →
-`railway up` → generate a domain → paste capability URLs into your clients.
+Full walkthrough: [`DEPLOY.md`](DEPLOY.md). Short version: `railway init` →
+add Postgres (pgvector) → set env vars → `railway up` → generate a domain →
+paste capability URLs into your clients.
 
 ## How it works
 
@@ -79,13 +101,11 @@ Short version: `railway init` → add Postgres (pgvector) → set env vars →
                 paths)
 ```
 
-- **Extraction modes:** `anthropic` (Claude distills + dedups facts) ·
-  `ollama` (local LLM, nothing leaves your machine) · `none` (raw storage,
-  zero external calls). Embeddings are always local.
 - **Scopes:** every memory is tagged (`dietary`, `shopping`, `travel`, …) —
   the spine of the future per-scope consent layer.
-- **Trust model:** run it fully local, or self-host the deploy. The hosted
-  instance is a custodian, not an owner — export and delete at any time.
+- **Trust model:** run it fully local (`none` mode: nothing leaves your
+  machine), or self-host the deploy. The hosted instance is a custodian, not
+  an owner — export and delete at any time.
 
 ## Roadmap
 

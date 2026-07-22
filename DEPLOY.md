@@ -13,7 +13,7 @@ ChatGPT** can both connect and share memory. This is the single-tenant demo
   ```
 
 ## 1. Create the project + database
-From `context-layer/`:
+From the repo root:
 ```bash
 railway init                  # create a new project (name it e.g. context-layer)
 ```

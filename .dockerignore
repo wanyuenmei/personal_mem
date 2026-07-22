@@ -8,3 +8,6 @@ __pycache__/
 .git/
 .DS_Store
 scripts/
+personal-context-layer-brief.md
+DEPLOY.md
+.ruff_cache/
