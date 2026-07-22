@@ -1,4 +1,4 @@
-"""Test-wide environment setup.
+"""Test-wide environment setup and shared fixtures.
 
 context_layer.config reads its configuration from the environment at IMPORT
 time (module-level globals), so these vars must be set before anything in
@@ -12,20 +12,40 @@ temp directory so tests never read or write the developer's real
 EXTRACTION_MODE=none means mem0 stores raw text and embeds it, without
 invoking any LLM for fact-extraction — so tests need no ANTHROPIC_API_KEY and
 make no outbound LLM calls. The embedder still runs for real (fastembed,
-local/ONNX, 384-dim) so these tests exercise a real local vector store, not a
-mock — the whole point of an isolation test is to prove the filter actually
-holds in the store, not merely that the Python call sites look right.
+local/ONNX, 384-dim) so the isolation test exercises a real local vector
+store, not a mock — the whole point of that test is to prove the filter
+actually holds in the store, not merely that the Python call sites look right.
+
+The `fake_mem0` fixture below is the opposite tack, for the PER-7 tests
+(scope filtering, config shape, tool error handling): those exercise our own
+code against a fully in-memory mem0 double so they never touch a real
+backend at all. Both styles coexist — tests opt into `fake_mem0` when they
+want the double; the isolation test just constructs a real ContextStore.
 """
 
 import hashlib
 import os
 import re
 import tempfile
+from unittest.mock import MagicMock
+
+import pytest
 
 os.environ.setdefault("EXTRACTION_MODE", "none")
 os.environ.setdefault("VECTOR_STORE", "chroma")
 os.environ.setdefault("EMBEDDER_PROVIDER", "fastembed")
 os.environ["CONTEXT_LAYER_DATA"] = tempfile.mkdtemp(prefix="context-layer-test-")
+
+
+@pytest.fixture
+def fake_mem0(monkeypatch):
+    """Patch mem0.Memory.from_config to return a MagicMock in place of a real
+    mem0.Memory instance, so ContextStore() never touches a real backend."""
+    import mem0
+
+    fake = MagicMock(name="fake_mem0_memory")
+    monkeypatch.setattr(mem0.Memory, "from_config", lambda cfg: fake)
+    return fake
 
 
 def _patch_offline_embedder() -> None:

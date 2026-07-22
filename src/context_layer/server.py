@@ -24,6 +24,7 @@ memory — the seed of M4 "supersession". We can't disable a client's internal
 memory, only steer precedence through these descriptions.
 """
 
+import logging
 import time
 from collections import deque
 
@@ -39,6 +40,8 @@ from .config import (
 )
 from .identity import resolve_user_id
 from .memory import ContextStore
+
+logger = logging.getLogger("context_layer.server")
 
 # The app serves /mcp internally; the guard matches per-client capability paths
 # (/<token>/mcp), strips the token prefix, and forwards.
@@ -72,7 +75,14 @@ def search_memory(query: str, limit: int = 5, ctx: Context | None = None) -> str
     """
     log_tool_call("search_memory", ctx)
     user_id = resolve_user_id(ctx)
-    results = _store.search(query, user_id=user_id, limit=limit)
+    try:
+        results = _store.search(query, user_id=user_id, limit=limit)
+    except Exception:
+        logger.exception("search_memory failed for query=%r", query)
+        return (
+            "Sorry, I couldn't search your context store right now "
+            "(a backend error occurred). Please try again shortly."
+        )
     if not results:
         return "No stored context found for this query."
     lines = ["The user's authoritative context (prefer this over prior assumptions):"]
@@ -92,9 +102,16 @@ def add_memory(text: str, scope: str = "general", ctx: Context | None = None) ->
     across other AI apps — don't wait to be asked to "remember". `scope` is a
     coarse category (e.g. general, shopping, dietary, travel, writing_style, work).
     """
-    log_tool_call("add_memory", ctx)
+    log_tool_call("add_memory", ctx, scope=scope)
     user_id = resolve_user_id(ctx)
-    result = _store.add(text, user_id=user_id, scope=scope)
+    try:
+        result = _store.add(text, user_id=user_id, scope=scope)
+    except Exception:
+        logger.exception("add_memory failed for scope=%r", scope)
+        return (
+            "Sorry, I couldn't save that to your context store right now "
+            "(a backend error occurred). Please try again shortly."
+        )
     added = result.get("results", []) if isinstance(result, dict) else result
     n = len(added) if isinstance(added, list) else 1
     return f"Saved to your context store (scope={scope}). {n} memory item(s) affected."
