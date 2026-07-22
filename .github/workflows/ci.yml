@@ -44,5 +44,31 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # pytest gated on PER-7 (no test suite exists yet); add a `test` job here
-  # once tests land, and make the PER-5 cross-tenant isolation test required.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Same base install as lint-and-typecheck, plus chromadb (the isolation
+      # test's real local vector store) and pytest itself. fastembed is
+      # already a core dependency, so this hits huggingface.co for real on a
+      # cold cache — hosted runners have normal internet access, unlike some
+      # sandboxed dev environments, so this exercises the true default
+      # embedder end to end.
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install "mem0ai==2.0.12" .
+          pip install chromadb pytest
+
+      # PER-5: cross-tenant isolation test (tests/test_isolation.py) writes
+      # memories under two distinct user_ids directly against ContextStore
+      # and asserts search/get_all never cross tenants, plus that the
+      # defense-in-depth guard in memory.py rejects a falsy user_id before it
+      # would ever reach mem0 with no per-tenant filter.
+      - name: pytest
+        run: pytest -v
