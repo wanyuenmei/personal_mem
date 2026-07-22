@@ -152,7 +152,9 @@ PUBLIC_SERVER_URL=https://<your-domain>/mcp       # this server's public MCP URL
 
 > Not yet verified against a live WorkOS tenant — the token-verification logic
 > is unit-tested with mock tokens, but a human must confirm the end-to-end flow
-> with real WorkOS credentials before relying on OAuth mode.
+> with real WorkOS credentials before relying on OAuth mode. Step-by-step setup
+> + verification checklist: [`docs/workos-oauth-runbook.md`](docs/workos-oauth-runbook.md)
+> (pre-flight wiring check: `python scripts/verify_oauth.py https://<your-domain>`).
 
 ## Deploy (Railway)
 
