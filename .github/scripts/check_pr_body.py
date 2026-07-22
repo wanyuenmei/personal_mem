@@ -49,11 +49,22 @@ def check(body: str) -> list[str]:
         if key not in sections:
             errors.append(f"missing section: ## {name}")
             continue
-        if not _strip_comments(sections[key]).strip():
+        content = _strip_comments(sections[key])
+        if not content.strip():
             errors.append(
                 f"section '## {name}' is empty — fill it in, don't leave only "
                 "the template prompt"
             )
+            continue
+        # Testing is a checklist: if it has checkboxes, at least one must be
+        # ticked (the N/A box counts) so it can't pass all-unchecked.
+        if key == "testing":
+            boxes = re.findall(r"(?mi)^\s*[-*]\s*\[([ x])\]", content)
+            if boxes and not any(b.lower() == "x" for b in boxes):
+                errors.append(
+                    "section '## Testing' has a checklist but no box is checked "
+                    "— tick what you did (or the N/A box)"
+                )
 
     ticket = _strip_comments(sections.get("ticket", "")).strip()
     if ticket and "linear.app/" not in ticket:

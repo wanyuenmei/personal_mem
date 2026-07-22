@@ -23,8 +23,13 @@ then delete this comment.
 <!-- The motivation: the problem being solved, the ticket context, the trade-offs. -->
 
 ## Testing
-<!-- How you verified this: commands run (ruff / pyright / pytest), tests added
-     or updated, and any manual checks. Use "N/A" only for docs-only changes. -->
+<!-- Tick what you actually did; add or edit items as needed. At least one box
+     must be checked (use the N/A box for docs/config-only changes). -->
+- [ ] `ruff check .` passes
+- [ ] `pyright src` passes
+- [ ] `pytest` passes (tests added/updated where relevant)
+- [ ] Manually verified (describe below)
+- [ ] N/A — docs/config only, nothing to test
 
 ## Deploy impact
 <!-- Does this change what runs in production? Note env vars added/changed,

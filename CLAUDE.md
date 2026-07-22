@@ -13,8 +13,8 @@ When opening a PR, follow `.github/pull_request_template.md`. Specifically:
   - **Description** — what the PR is.
   - **What changed** — the concrete changes.
   - **Why** — motivation / ticket context / trade-offs.
-  - **Testing** — how it was verified (ruff / pyright / pytest, tests added,
-    manual checks); "N/A" only for docs-only changes.
+  - **Testing** — a checklist of what was verified (ruff / pyright / pytest /
+    manual); tick at least one box (use the N/A box for docs/config-only).
   - **Deploy impact** — env/schema/dependency/flag changes, or "None". No
     deploy happens without an explicit go-ahead.
 - Match the template's structure rather than writing an ad-hoc body.
