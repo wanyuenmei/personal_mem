@@ -123,6 +123,33 @@ Where to paste it, per client:
 
 Do this once per client, right after connecting its capability URL above.
 
+**OAuth mode (M2.2, WorkOS AuthKit) — additional/opt-in.** Instead of a secret
+URL, friends can add the plain `https://<your-domain>/mcp` connector, get bounced
+to a WorkOS sign-in, and land in their own isolated memory namespace. This is
+**additive**: it turns on only when the WorkOS env vars are set, and the
+capability-path mode above keeps working until it's retired (PER-22). Once
+configured, the server runs as an OAuth 2.0 Resource Server — it publishes
+`/.well-known/oauth-protected-resource`, and Claude/ChatGPT connector UIs drive
+discovery + dynamic client registration and sign-in **against WorkOS** natively;
+each `/mcp` request then carries a WorkOS-issued bearer token the server verifies
+against WorkOS's JWKS.
+
+To enable it you must (a) create a WorkOS project with **AuthKit** enabled and
+**Dynamic Client Registration** turned on (WorkOS's "AuthKit for MCP"), (b) add
+`https://<your-domain>/mcp` as an allowed resource/redirect per WorkOS's MCP
+setup, and (c) set these env vars (see `.env.example` for the full list):
+
+```
+WORKOS_CLIENT_ID=client_...              # WorkOS Dashboard
+WORKOS_AUTHKIT_DOMAIN=https://<app>.authkit.app   # AuthKit issuer
+PUBLIC_SERVER_URL=https://<your-domain>/mcp       # this server's public MCP URL
+# optional: WORKOS_API_KEY, WORKOS_AUDIENCE, WORKOS_REQUIRED_SCOPES
+```
+
+> Not yet verified against a live WorkOS tenant — the token-verification logic
+> is unit-tested with mock tokens, but a human must confirm the end-to-end flow
+> with real WorkOS credentials before relying on OAuth mode.
+
 ## Deploy (Railway)
 
 Full walkthrough: [`DEPLOY.md`](DEPLOY.md). Short version: `railway init` →

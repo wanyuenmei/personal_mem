@@ -7,16 +7,33 @@ Transport is env-selected (config.MCP_TRANSPORT):
 Every tool resolves the caller to a user_id via identity.resolve_user_id(ctx) —
 single-tenant today, the auth seam for M2.2.
 
-For the HTTP transport, auth is a CAPABILITY PATH: when CONTEXT_LAYER_TOKEN is
-set, the MCP endpoint is served at /<token>/mcp and the URL itself is the
-credential. Why not a bearer header or ?token= query param: connector UIs
-(Claude web/desktop, ChatGPT) can't send custom headers AND strip query strings
-from connector URLs; worse, answering 401 makes MCP clients assume OAuth and
-launch a sign-in flow that can't succeed. With a secret path, wrong paths get a
-natural 404 and no 401 is ever emitted. A pure-ASGI guard (not
-BaseHTTPMiddleware, so it never buffers the SSE stream) adds a crude global
-rate limit so the endpoint can't run up unbounded Anthropic spend. All of this
-is a stopgap until the M2.2 OAuth layer lands.
+For the HTTP transport there are now two mutually-exclusive auth modes, chosen
+purely by whether WorkOS is configured (config.workos_enabled()):
+
+1. OAuth Resource Server (M2.2, when WORKOS_* env is set). FastMCP is built with
+   auth settings + a WorkOS token verifier (see auth.py): it publishes
+   /.well-known/oauth-protected-resource pointing at the WorkOS AuthKit issuer,
+   requires a verified Bearer token on /mcp, and — deliberately — answers 401
+   with a WWW-Authenticate resource hint so connector UIs launch WorkOS sign-in.
+   Discovery + dynamic client registration + /authorize + /token all live on
+   WorkOS; we are only the resource server. We DON'T capability-path-wrap here
+   (that would 404 the discovery routes and swallow the 401); we keep only the
+   rate limit.
+
+2. CAPABILITY PATH (M2.1 stopgap, when WorkOS is unset — the default). The MCP
+   endpoint is served at /<token>/mcp and the URL itself is the credential. Why
+   not a bearer header or ?token= query param: connector UIs (Claude web/desktop,
+   ChatGPT) can't send custom headers AND strip query strings from connector
+   URLs; worse, answering 401 there makes MCP clients assume OAuth and launch a
+   sign-in flow that can't succeed WITHOUT a real OAuth backend. With a secret
+   path, wrong paths get a natural 404 and no 401 is ever emitted. That "never
+   401" reasoning is exactly what flips in mode 1 above, once a real OAuth
+   backend exists. This mode is retired only by PER-22, after OAuth is validated
+   live against a real WorkOS tenant.
+
+Both modes use a pure-ASGI guard (not BaseHTTPMiddleware, so it never buffers
+the SSE stream) that adds a crude global rate limit so the endpoint can't run up
+unbounded Anthropic spend.
 
 The tool descriptions deliberately tell the client this store is the user's
 *authoritative* context and should take precedence over the client's own
@@ -31,20 +48,25 @@ from collections import deque
 from mcp.server.fastmcp import Context, FastMCP
 
 from .access_log import log_tool_call
+from .auth import build_fastmcp_auth_kwargs
 from .config import (
     CONTEXT_LAYER_TOKENS,
     MCP_HOST,
     MCP_PORT,
     MCP_TRANSPORT,
     RATE_LIMIT_RPM,
+    workos_enabled,
 )
 from .identity import resolve_user_id
 from .memory import ContextStore
 
 logger = logging.getLogger("context_layer.server")
 
-# The app serves /mcp internally; the guard matches per-client capability paths
-# (/<token>/mcp), strips the token prefix, and forwards.
+# The app serves /mcp internally. In capability-path mode the guard matches
+# per-client paths (/<token>/mcp) and forwards; in OAuth mode FastMCP itself
+# adds the auth routes + middleware. build_fastmcp_auth_kwargs() supplies those
+# kwargs when WorkOS is configured, or is empty otherwise — leaving the
+# constructor identical to before when OAuth is off.
 mcp = FastMCP(
     "personal-context-layer",
     instructions=(
@@ -58,6 +80,7 @@ mcp = FastMCP(
     port=MCP_PORT,
     stateless_http=True,
     streamable_http_path="/mcp",
+    **build_fastmcp_auth_kwargs(),
 )
 _store = ContextStore()
 
@@ -115,6 +138,37 @@ def add_memory(text: str, scope: str = "general", ctx: Context | None = None) ->
     added = result.get("results", []) if isinstance(result, dict) else result
     n = len(added) if isinstance(added, list) else 1
     return f"Saved to your context store (scope={scope}). {n} memory item(s) affected."
+
+
+class RateLimitGuard:
+    """Pure-ASGI guard: just the crude global rate limit, no path matching.
+
+    Used in OAuth mode, where FastMCP owns auth (discovery routes, the 401 with
+    a WWW-Authenticate hint, and bearer verification) and capability-path
+    rewriting must NOT be applied — it would 404 the /.well-known/* routes and
+    swallow the 401 that connectors need. We still want the spend cap, so this
+    keeps only the rate limit from CapabilityPathGuard.
+    """
+
+    def __init__(self, app, rpm: int) -> None:
+        self.app = app
+        self.rpm = rpm
+        self._hits: deque[float] = deque()
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        now = time.monotonic()
+        while self._hits and now - self._hits[0] > 60:
+            self._hits.popleft()
+        if len(self._hits) >= self.rpm:
+            await send({"type": "http.response.start", "status": 429,
+                        "headers": [(b"content-type", b"text/plain")]})
+            await send({"type": "http.response.body", "body": b"rate limit exceeded"})
+            return
+        self._hits.append(now)
+        await self.app(scope, receive, send)
 
 
 class CapabilityPathGuard:
@@ -175,7 +229,13 @@ def main() -> None:
     if MCP_TRANSPORT in ("streamable-http", "http"):
         import uvicorn
 
-        app = CapabilityPathGuard(mcp.streamable_http_app(), CONTEXT_LAYER_TOKENS, RATE_LIMIT_RPM)
+        inner = mcp.streamable_http_app()
+        if workos_enabled():
+            # OAuth mode: FastMCP already added the auth routes + bearer
+            # middleware; only the rate-limit guard applies (no capability paths).
+            app = RateLimitGuard(inner, RATE_LIMIT_RPM)
+        else:
+            app = CapabilityPathGuard(inner, CONTEXT_LAYER_TOKENS, RATE_LIMIT_RPM)
         uvicorn.run(app, host=MCP_HOST, port=MCP_PORT)
     elif MCP_TRANSPORT == "sse":
         mcp.run(transport="sse")
