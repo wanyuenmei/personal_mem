@@ -31,7 +31,7 @@ from typing import Optional
 
 from mem0 import Memory
 
-from .config import build_mem0_config, infer_enabled
+from context_layer.config import build_mem0_config, infer_enabled
 
 
 class TenantIsolationError(ValueError):

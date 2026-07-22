@@ -35,7 +35,7 @@ from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
 
-from . import config
+from context_layer import config
 
 # A signing-key resolver maps a raw JWT to the key used to verify its signature.
 # Production uses PyJWKClient (fetches + caches the tenant's public JWKS); tests

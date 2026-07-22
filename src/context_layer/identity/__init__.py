@@ -18,7 +18,7 @@ from typing import Optional
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import Context
 
-from .config import DEFAULT_USER_ID, WORKOS_USER_ID_PREFIX
+from context_layer.config import DEFAULT_USER_ID, WORKOS_USER_ID_PREFIX
 
 
 def resolve_user_id(ctx: Optional[Context] = None) -> str:
