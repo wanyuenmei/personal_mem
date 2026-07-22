@@ -18,16 +18,23 @@ Decision #9 in the [founding brief](personal-context-layer-brief.md).
 
 ## What's here
 
+One package, one directory per architecture layer (see
+[`docs/architecture.md`](docs/architecture.md) for the full map + diagram):
+
 ```
 src/context_layer/
-  config.py    # env-driven config: extraction modes, stores, embedders, transport
-  memory.py    # ContextStore over mem0: add/search/all, scope tagging
-  identity.py  # resolve_user_id — the (future OAuth) tenant seam
-  server.py    # MCP server: search_memory/add_memory, stdio + streamable-HTTP,
-               # per-client capability paths + rate limit
+  app.py, __main__.py   # composition root + entrypoint (`python -m context_layer`)
+  config.py             # env-driven settings: extraction modes, stores, embedders, transport
+  transport/            # stdio + streamable-HTTP assembly; /health endpoint
+  auth/                 # capability-path + rate-limit guards; WorkOS OAuth (opt-in)
+  tools/                # the MCP tools: search_memory / add_memory
+  identity/             # resolve_user_id — the tenant seam
+  memory/               # ContextStore over mem0: add/search/all, scope tagging
+  observability/        # structured access/audit log
 scripts/
-  smoke_test.py   # add + search end-to-end without MCP
-  inspect_db.py   # dump everything stored about you (the audit view, in embryo)
+  smoke_test.py         # add + search end-to-end without MCP
+  inspect_db.py         # dump everything stored about you (the audit view, in embryo)
+docs/architecture.md    # layer-by-layer map + request-flow diagram
 Dockerfile, railway.json, DEPLOY.md   # deploy artifacts (Railway)
 personal-context-layer-brief.md       # founding brief: decisions #1–9, GTM
 ```
@@ -70,7 +77,7 @@ depends on a cloud provider.
 "personal-context": {
   "command": "uv",
   "args": ["--directory", "<path-to-this-repo>",
-           "run", "python", "-m", "context_layer.server"]
+           "run", "python", "-m", "context_layer"]
 }
 ```
 
@@ -166,6 +173,11 @@ paste capability URLs into your clients.
                 capability
                 paths)
 ```
+
+For the full request path — transport → auth guards → tools → identity seam →
+memory store → mem0 → vector store — see
+[`docs/architecture.md`](docs/architecture.md). The server also exposes
+`GET /health` (200, no auth) for liveness/readiness probes.
 
 - **Scopes:** every memory is tagged (`dietary`, `shopping`, `travel`, …) —
   the spine of the future per-scope consent layer.

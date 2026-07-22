@@ -64,6 +64,10 @@ Paste that full URL into Claude / ChatGPT connector settings — no separate aut
 step. Rotate by changing CONTEXT_LAYER_TOKEN and re-pasting.
 Quick check it's alive:
 ```bash
+# liveness — no token/auth needed, answered before the guards:
+curl -s https://<your-domain>/health          # -> ok
+
+# full MCP handshake:
 curl -s -X POST https://<your-domain>/mcp \
   -H 'Content-Type: application/json' \
   -H 'Accept: application/json, text/event-stream' \
