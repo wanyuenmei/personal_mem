@@ -7,6 +7,11 @@
   titles, or PR descriptions — they age badly and mean nothing to a future
   reader. Name the concrete thing ("the OAuth layer", "the consent layer")
   and use Linear ticket ids (`PER-N`) when you need a pointer.
+- **Don't link Linear documents from repo files.** Keep the repo
+  self-contained — internal planning/strategy lives in Linear docs (Founding
+  Brief, Decision log, Architecture narrative); README, `ARCHITECTURE.md`, and
+  other repo files shouldn't point at them. (PR *descriptions* still link the
+  Linear ticket — that's issue traceability, not a doc link.)
 
 ## Pull requests
 
