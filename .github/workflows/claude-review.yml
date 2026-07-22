@@ -1,0 +1,61 @@
+name: Claude Review
+
+# Automated first-pass PR review. Runs on every PR update and posts its
+# findings as a tracked review comment, before a human looks at the diff.
+#
+# Inert until the owner enables it:
+#   1. Add ANTHROPIC_API_KEY as a repo secret (Settings -> Secrets and
+#      variables -> Actions).
+#   2. Install the Claude GitHub App on the repo (`/install-github-app`, or
+#      from the GitHub Marketplace).
+# Without both, the job is skipped (see the `if` guard below) or no-ops.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Least privilege: read the code, comment on the PR. No write access to
+# contents — the reviewer never pushes. id-token: write lets the action mint
+# an OIDC token to exchange for the Claude GitHub App installation token.
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+  id-token: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # Skip on forks — secrets aren't exposed to fork PRs.
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    # Hoisted to job level so the step `if` can gate on it (secrets can't be
+    # referenced directly in an `if`). Empty until the owner sets the secret.
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        # No-op (green) until the key is wired up, instead of a red failure.
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Post findings as a tracked review comment tied to this PR.
+          track_progress: true
+          prompt: |
+            Review this pull request. Focus on, in priority order:
+            - Correctness: real bugs, unhandled errors, broken edge cases.
+            - Tenant isolation & security: anything that could leak one
+              user's memory to another, weaken the auth guards, or mishandle
+              secrets/tokens. This is the product's core promise.
+            - Tests: is new behavior covered, and do existing tests still hold?
+            - Repo conventions in CLAUDE.md (PR-template sections, no milestone
+              references, succinct history).
+            Be concrete and cite file:line. Skip nits and style already
+            enforced by ruff. If the PR looks good, say so briefly rather than
+            inventing concerns.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 15
