@@ -36,5 +36,14 @@ CI enforces both: `.github/workflows/pr-title.yml` checks the title format,
 and `.github/workflows/pr-body.yml` (via `.github/scripts/check_pr_body.py`)
 checks the required sections are present and filled in.
 
-<!-- Room to grow: branch naming, test/lint expectations (see CI in
+## Branches & merge state
+
+- **Check a PR's merge state before pushing to its branch.** A merged PR is
+  finished: pushing follow-up commits to its branch strands them (they land
+  after the merge and never reach `main`), and editing a merged PR's body is
+  misleading. Before pushing follow-up work or updating a PR, confirm it's
+  still open; if it has merged, branch fresh from the latest `main` and open a
+  new PR for the follow-up.
+
+<!-- Room to grow: test/lint expectations (see CI in
      .github/workflows/ci.yml and the ruff config in pyproject.toml), etc. -->
