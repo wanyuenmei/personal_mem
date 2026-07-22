@@ -13,7 +13,11 @@ def main() -> None:
     store = ContextStore()
 
     print("\n-- add --")
-    print(store.add("I prefer dark roast coffee, no sugar.", user_id=DEFAULT_USER_ID, scope="dietary"))
+    print(store.add(
+        "I prefer dark roast coffee, no sugar.",
+        user_id=DEFAULT_USER_ID,
+        scope="dietary",
+    ))
     print(store.add(
         "I'm shopping for slim-fit selvedge denim in a 32 waist.",
         user_id=DEFAULT_USER_ID,
