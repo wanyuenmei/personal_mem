@@ -1,11 +1,11 @@
 """Build the mem0 configuration + server settings from environment.
 
-Everything here is designed so that LOCAL defaults are unchanged from M1
-(stdio transport, Chroma store, HuggingFace embedder) and the DEPLOY path is
+Everything here is designed so that the LOCAL defaults (stdio transport,
+Chroma store, HuggingFace embedder) stay unchanged and the DEPLOY path is
 opt-in via env vars. That means your existing local setup and data keep working
 untouched; Railway just sets a handful of variables.
 
-Extraction backend (unchanged from M1) is pluggable via EXTRACTION_MODE:
+Extraction backend is pluggable via EXTRACTION_MODE:
   anthropic | ollama | none  (none => infer=False, nothing leaves the machine)
 """
 
@@ -88,7 +88,7 @@ MCP_HOST = os.getenv("MCP_HOST", "0.0.0.0")
 # Railway (and most PaaS) inject PORT; fall back to MCP_PORT then 8000.
 MCP_PORT = int(os.getenv("PORT", os.getenv("MCP_PORT", "8000")))
 
-# --- HTTP guardrails (stopgap until M2.2 OAuth) -----------------------------
+# --- HTTP guardrails (stopgap until OAuth) ----------------------------------
 # Capability tokens: each token gets its own secret endpoint /<token>/mcp, so
 # individual clients can be issued + revoked independently. Format:
 #   CONTEXT_LAYER_TOKENS="claude:abc123,cursor:def456"  (label:token pairs)
@@ -119,7 +119,7 @@ CONTEXT_LAYER_TOKENS = _parse_tokens()
 # Crude global cap so an exposed endpoint can't run up unbounded Anthropic spend.
 RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "120"))
 
-# --- OAuth multi-tenancy (M2.2, WorkOS AuthKit) -----------------------------
+# --- OAuth multi-tenancy (WorkOS AuthKit) -----------------------------------
 # ADDITIVE and fully opt-in: when these are UNSET the server behaves exactly as
 # today (CapabilityPathGuard + single-tenant resolve_user_id). When set, the
 # HTTP transport runs as an OAuth 2.0 Resource Server (RFC 9728): FastMCP
@@ -128,7 +128,7 @@ RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "120"))
 # sign in AGAINST WORKOS, and every /mcp request must carry a WorkOS-issued
 # Bearer access token that we verify against WorkOS's JWKS.
 #
-# NB: this is the deliberate reversal of the M2.1 "never answer 401" rule — in
+# NB: this is the deliberate reversal of the "never answer 401" rule — in
 # OAuth mode a 401 with a WWW-Authenticate resource_metadata hint is exactly
 # what makes a connector launch its (now-succeedable) sign-in flow. It only
 # happens when WorkOS is configured; the capability-path deploy is untouched.

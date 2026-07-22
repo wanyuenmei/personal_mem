@@ -123,7 +123,7 @@ Where to paste it, per client:
 
 Do this once per client, right after connecting its capability URL above.
 
-**OAuth mode (M2.2, WorkOS AuthKit) — additional/opt-in.** Instead of a secret
+**OAuth mode (WorkOS AuthKit) — additional/opt-in.** Instead of a secret
 URL, friends can add the plain `https://<your-domain>/mcp` connector, get bounced
 to a WorkOS sign-in, and land in their own isolated memory namespace. This is
 **additive**: it turns on only when the WorkOS env vars are set, and the

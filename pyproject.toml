@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Local-dev stack (M1 defaults). NOT installed in the deploy image, which runs
+# Local-dev stack (the defaults). NOT installed in the deploy image, which runs
 # fastembed + pgvector. Keeps the container free of torch/chromadb.
 local = [
     "sentence-transformers>=3.0",  # HuggingFace embedder
