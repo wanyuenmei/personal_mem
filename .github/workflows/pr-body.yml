@@ -1,0 +1,31 @@
+name: PR body
+
+# Enforces that the PR description follows .github/pull_request_template.md:
+# every required section present and filled in (not left as the empty prompt),
+# and a Linear link in the Ticket section. See .github/scripts/check_pr_body.py.
+#
+# Runs on `edited` too, so fixing the body re-checks without a new commit push.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  check-body:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check PR body against the template
+        # Body passed via env var (never interpolated into the shell) so a
+        # crafted PR description can't inject commands.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python .github/scripts/check_pr_body.py
