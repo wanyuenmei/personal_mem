@@ -99,6 +99,43 @@ def test_add_without_user_id_raises(fake_mem0):
         store.add("some fact")
 
 
+def test_add_accepts_messages_list_and_merges_extra_metadata(fake_mem0):
+    """The backfill importer passes a whole conversation as a messages list and
+    stamps source/source_id provenance, merged alongside the scope tag."""
+    fake_mem0.add.return_value = {"results": [{"id": "1"}]}
+    store = ContextStore()
+
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+    store.add(
+        messages,
+        user_id="mei",
+        scope="work",
+        extra_metadata={"source": "claude", "source_id": "c1"},
+    )
+
+    args, kwargs = fake_mem0.add.call_args
+    assert args[0] == messages
+    assert kwargs["user_id"] == "mei"
+    assert kwargs["metadata"] == {"scope": "work", "source": "claude", "source_id": "c1"}
+
+
+def test_add_infer_override_forces_extraction_on_or_off(fake_mem0):
+    """The backfill's extractor choice reaches mem0 as infer=, overriding the
+    global EXTRACTION_MODE so a 0-cost test run can skip the LLM (and a forced
+    run can require it)."""
+    fake_mem0.add.return_value = {"results": []}
+    store = ContextStore()
+
+    store.add("x", user_id="mei", infer=False)
+    assert fake_mem0.add.call_args.kwargs["infer"] is False
+
+    store.add("x", user_id="mei", infer=True)
+    assert fake_mem0.add.call_args.kwargs["infer"] is True
+
+
 def test_all_filters_by_user_id_only(fake_mem0):
     fake_mem0.get_all.return_value = {"results": [{"memory": "x"}]}
     store = ContextStore()

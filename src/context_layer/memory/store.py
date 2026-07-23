@@ -85,18 +85,33 @@ class ContextStore:
 
     def add(
         self,
-        text: str,
+        content: "str | list[dict]",
         user_id: Optional[str] = None,
         scope: str = "general",
+        extra_metadata: Optional[dict] = None,
+        infer: Optional[bool] = None,
     ) -> dict:
-        """Store a memory. With extraction on, mem0 distills/dedups facts;
-        with EXTRACTION_MODE=none it stores the raw text and embeds it."""
+        """Store a memory. `content` is either raw text or a list of
+        {"role", "content"} message dicts (a whole conversation) — mem0 accepts
+        both, and passing the turns keeps conversation structure for better
+        extraction than a flattened blob. With extraction on, mem0 distills/dedups
+        facts; with EXTRACTION_MODE=none it stores the content and embeds it.
+        `extra_metadata`, if given, is merged alongside the scope tag (e.g. the
+        backfill importer stamps source/source_id provenance).
+
+        `infer` overrides the extraction setting for THIS call: True forces LLM
+        fact-extraction, False stores the content with no LLM (a 0-cost path —
+        e.g. for testing the ingest pipeline without paying for extraction).
+        None (the default) follows EXTRACTION_MODE via infer_enabled()."""
         user_id = _require_user_id(user_id, op="add a memory")
+        metadata = {"scope": scope}
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return self._mem.add(
-            text,
+            content,
             user_id=user_id,
-            metadata={"scope": scope},
-            infer=infer_enabled(),
+            metadata=metadata,
+            infer=infer_enabled() if infer is None else infer,
         )
 
     def search(
