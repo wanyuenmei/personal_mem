@@ -107,3 +107,69 @@ def test_all_filters_by_user_id_only(fake_mem0):
 
     fake_mem0.get_all.assert_called_once_with(filters={"user_id": "alice"})
     assert results == [{"memory": "x"}]
+
+
+def test_delete_removes_memory_owned_by_user(fake_mem0):
+    fake_mem0.get.return_value = {"id": "m1", "memory": "x", "user_id": "alice"}
+    store = ContextStore()
+
+    result = store.delete("m1", user_id="alice")
+
+    fake_mem0.delete.assert_called_once_with("m1")
+    assert result == {"deleted": True, "id": "m1"}
+
+
+def test_delete_absent_memory_returns_not_found_and_does_not_call_delete(fake_mem0):
+    """Idempotent delete: an id with no memory behind it is a no-op, not an error."""
+    fake_mem0.get.return_value = None
+    store = ContextStore()
+
+    result = store.delete("gone", user_id="alice")
+
+    assert result == {"deleted": False, "id": "gone", "reason": "not_found"}
+    fake_mem0.delete.assert_not_called()
+
+
+def test_delete_refuses_cross_tenant_and_does_not_call_delete(fake_mem0):
+    """The id exists but belongs to bob — alice must not be able to delete it."""
+    fake_mem0.get.return_value = {"id": "m1", "memory": "x", "user_id": "bob"}
+    store = ContextStore()
+
+    with pytest.raises(TenantIsolationError):
+        store.delete("m1", user_id="alice")
+
+    fake_mem0.delete.assert_not_called()
+
+
+def test_delete_without_user_id_raises_before_touching_mem0(fake_mem0):
+    """PER-5 hardening: delete must refuse a falsy user_id rather than defaulting,
+    and must not even look the memory up before the guard passes."""
+    store = ContextStore()
+
+    with pytest.raises(TenantIsolationError):
+        store.delete("m1")
+
+    fake_mem0.get.assert_not_called()
+    fake_mem0.delete.assert_not_called()
+
+
+def test_delete_all_wipes_the_users_memories_and_reports_count(fake_mem0):
+    fake_mem0.get_all.return_value = {"results": [{"id": "1"}, {"id": "2"}]}
+    store = ContextStore()
+
+    result = store.delete_all(user_id="alice")
+
+    fake_mem0.delete_all.assert_called_once_with(user_id="alice")
+    assert result == {"deleted_all": True, "user_id": "alice", "count": 2}
+
+
+def test_delete_all_without_user_id_raises_before_touching_mem0(fake_mem0):
+    """The catastrophic case: mem0's delete_all with no filter wipes EVERY
+    tenant, so a falsy user_id must raise before it ever reaches mem0."""
+    store = ContextStore()
+
+    with pytest.raises(TenantIsolationError):
+        store.delete_all()
+
+    fake_mem0.get_all.assert_not_called()
+    fake_mem0.delete_all.assert_not_called()

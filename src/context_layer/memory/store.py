@@ -121,3 +121,60 @@ class ContextStore:
         user_id = _require_user_id(user_id, op="list all memories")
         res = self._mem.get_all(filters={"user_id": user_id})
         return _as_results(res)
+
+    def delete(self, memory_id: str, user_id: Optional[str] = None) -> dict:
+        """Delete a single memory by id — but only if it belongs to `user_id`.
+
+        Internal use for now, deliberately NOT wired into an MCP tool: the
+        reconciliation / version-control work will call this to prune a
+        superseded memory once that lands. It's exposed on the store so those
+        callers (and admin scripts) have a tenant-safe primitive to build on.
+
+        mem0's own `delete(memory_id)` takes NO user filter, so a bare id would
+        let any caller delete ANY tenant's memory — the same single-point-of-
+        failure `_require_user_id` guards against on the read/write paths. This
+        wrapper fetches the memory first and refuses to delete unless its owner
+        matches the resolved `user_id`, keeping deletes behind the same
+        tenant-isolation choke point as add/search/all.
+
+        Returns ``{"deleted": True, "id": ...}`` on success, or
+        ``{"deleted": False, "id": ..., "reason": "not_found"}`` when no memory
+        with that id exists — delete is idempotent, so removing an absent id is
+        not an error. Raises TenantIsolationError on a falsy `user_id`, or when
+        the id resolves to a memory owned by a different tenant.
+        """
+        user_id = _require_user_id(user_id, op="delete a memory")
+        existing = self._mem.get(memory_id)
+        if not existing:
+            return {"deleted": False, "id": memory_id, "reason": "not_found"}
+        owner = existing.get("user_id")
+        if owner != user_id:
+            raise TenantIsolationError(
+                f"Refusing to delete memory {memory_id!r}: it belongs to a "
+                f"different tenant (owner={owner!r}, caller user_id={user_id!r}). "
+                "A delete must never cross tenant boundaries."
+            )
+        self._mem.delete(memory_id)
+        return {"deleted": True, "id": memory_id}
+
+    def delete_all(self, user_id: Optional[str] = None) -> dict:
+        """Delete EVERY memory belonging to a single tenant.
+
+        The tenant-isolation guard matters most here: mem0's `delete_all()`
+        with no filter deletes across ALL tenants (it only raises if *nothing*
+        is passed), so a falsy user_id slipping through would wipe every user's
+        data. `_require_user_id` refuses a falsy id loudly before the call ever
+        reaches mem0, and the `user_id=` filter scopes the wipe to exactly one
+        tenant.
+
+        Internal use for now, deliberately NOT wired into an MCP tool — the
+        user-facing "delete everything" / account-erasure flow will build on
+        this primitive.
+
+        Returns ``{"deleted_all": True, "user_id": ..., "count": N}`` where N is
+        how many memories were removed (counted before the wipe).
+        """
+        user_id = _require_user_id(user_id, op="delete all memories")
+        count = len(self.all(user_id=user_id))
+        self._mem.delete_all(user_id=user_id)
+        return {"deleted_all": True, "user_id": user_id, "count": count}
