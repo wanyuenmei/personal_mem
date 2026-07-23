@@ -49,8 +49,13 @@ jobs:
             one pass: run `git diff --stat` for the list of changed files and
             `git diff` for the full diff (the action gives you the exact base
             ref to diff against). Review from that diff, and only Read a file
-            when you need more surrounding context than the diff shows. Focus
-            on, in priority order:
+            when you need more surrounding context than the diff shows.
+            This is a static, read-only review: do NOT try to run the code —
+            no scripts, tests, linters, or builds, and no other shell commands
+            beyond `git diff`. Execution isn't available here; attempting it
+            only burns your turn budget on denied commands without producing a
+            review. Judge the code by reading it, not by running it.
+            Focus on, in priority order:
             - Correctness: real bugs, unhandled errors, broken edge cases.
             - Tenant isolation & security: anything that could leak one
               user's memory to another, weaken the auth guards, or mishandle
