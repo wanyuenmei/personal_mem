@@ -25,9 +25,14 @@ When opening a PR, follow `.github/pull_request_template.md`. Specifically:
 - **Title** must be `<ticket>: <short description>`, where `<ticket>` is the
   Linear issue id (e.g. `PER-7: add tests and tool error handling`). GitHub
   can't enforce this from the template, so it's on the author to match it.
+  A small correction that doesn't warrant its own Linear issue may instead use
+  `fix: <short description>` and omit the **Ticket** section below; every other
+  section still applies. Reach for a ticket by default — `fix:` is the
+  exception, not a way to skip writing one.
 - **Description** must contain these sections, matching the template:
   - **Ticket** — a link to the Linear issue (e.g.
-    `https://linear.app/personal-context-mcp/issue/PER-7`).
+    `https://linear.app/personal-context-mcp/issue/PER-7`). Omitted only on a
+    `fix:` PR.
   - **Description** — what the PR is.
   - **What changed** — the concrete changes.
   - **Why** — motivation / ticket context / trade-offs.
