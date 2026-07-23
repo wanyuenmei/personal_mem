@@ -1,6 +1,7 @@
 .venv/
 .venv-check/
 .claude/
+.worktrees/
 __pycache__/
 .pytest_cache/
 *.pyc
