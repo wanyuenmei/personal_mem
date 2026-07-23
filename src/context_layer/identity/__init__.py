@@ -27,8 +27,9 @@ def resolve_user_id(ctx: Optional[Context] = None) -> str:
     # the signature (server.py passes it) but the principal comes from the
     # request-scoped auth context, not from the tool arguments.
     token = get_access_token()
-    if token is not None and token.subject:
+    subject = token.subject.strip() if token is not None and token.subject else ""
+    if subject:
         # Namespace by prefix so an authenticated tenant can never collide with
         # the single-tenant DEFAULT_USER_ID space.
-        return f"{WORKOS_USER_ID_PREFIX}{token.subject}"
+        return f"{WORKOS_USER_ID_PREFIX}{subject}"
     return DEFAULT_USER_ID

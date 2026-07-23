@@ -27,6 +27,7 @@ tokens and no network or real WorkOS credentials. See tests/test_auth.py.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -36,6 +37,8 @@ from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
 
 from context_layer import config
+
+logger = logging.getLogger("context_layer.auth")
 
 # A signing-key resolver maps a raw JWT to the key used to verify its signature.
 # Production uses PyJWKClient (fetches + caches the tenant's public JWKS); tests
@@ -77,14 +80,12 @@ class WorkOSTokenVerifier(TokenVerifier):
         audience: str | None = None,
         required_scopes: list[str] | None = None,
         algorithms: tuple[str, ...] = ("RS256",),
-        user_id_prefix: str = "",
         leeway: int = 0,
     ) -> None:
         self.issuer = issuer.rstrip("/") if issuer else issuer
         self.audience = audience or None
         self.required_scopes = required_scopes or []
         self.algorithms = list(algorithms)
-        self.user_id_prefix = user_id_prefix
         self.leeway = leeway
         self._resolve_key = signing_key_resolver
 
@@ -98,7 +99,7 @@ class WorkOSTokenVerifier(TokenVerifier):
             audience=config.WORKOS_AUDIENCE or None,
             required_scopes=config.workos_required_scopes(),
             algorithms=("RS256",),
-            user_id_prefix=config.WORKOS_USER_ID_PREFIX,
+            leeway=config.WORKOS_LEEWAY,
         )
 
     @staticmethod
@@ -119,20 +120,38 @@ class WorkOSTokenVerifier(TokenVerifier):
                 token,
                 key,
                 algorithms=self.algorithms,
-                issuer=self.issuer or None,
+                # Issuer is validated below with trailing-slash normalization,
+                # not here, so a one-sided slash difference can't reject a valid
+                # token. `verify_aud` is only meaningful when we actually know
+                # the audience; WorkOS tenants that don't set `aud` would
+                # otherwise fail decode.
                 audience=self.audience,
                 leeway=self.leeway,
-                # `verify_aud` is only meaningful when we actually know the
-                # audience; WorkOS tenants that don't set `aud` would otherwise
-                # fail decode.
                 options={"verify_aud": self.audience is not None},
             )
-        except Exception:
-            # PyJWT raises subclasses of PyJWTError; PyJWKClient raises its own.
-            # Any failure to produce verified claims is an invalid token.
+        except jwt.PyJWKClientError as exc:
+            # Couldn't resolve the signing key — a JWKS fetch / network / config
+            # problem, NOT a bad token. Log it so a misconfigured deploy is
+            # debuggable instead of looking like a universal 401.
+            logger.warning("token verification could not resolve signing key: %s", exc)
+            return None
+        except jwt.InvalidTokenError:
+            # Ordinary invalid token (bad signature, expired, malformed, wrong
+            # claims). Expected and noisy — reject quietly.
+            return None
+        except Exception:  # pragma: no cover - defensive catch-all
+            logger.warning("unexpected error verifying token", exc_info=True)
             return None
 
-        subject = claims.get("sub")
+        # Trailing-slash-tolerant issuer check. WorkOS's issuer carries no
+        # trailing slash, but normalize both sides so a stray one can't turn a
+        # valid token into a false 401.
+        if self.issuer:
+            iss = claims.get("iss")
+            if not iss or str(iss).rstrip("/") != self.issuer:
+                return None
+
+        subject = (claims.get("sub") or "").strip()
         if not subject:
             return None
 
