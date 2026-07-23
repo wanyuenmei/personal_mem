@@ -55,16 +55,59 @@ that's the separate PER-22 step, gated on this runbook passing first.
 Exact labels shift as WorkOS iterates; the capabilities matter more than the menu
 names. Look for WorkOS's **"AuthKit for MCP"** guide, which packages these steps.
 
+Creating the environment, finding the AuthKit domain, and copying the Client ID
+(steps 1, 2 and 5 below) are faster via the CLI, which creates a sandbox
+environment on first login and stores its credentials in the system keyring:
+
+```bash
+npx workos@latest auth login    # device-code flow, opens a browser
+npx workos@latest env list      # confirm which environment is active
+```
+
+The CLI doesn't print the AuthKit domain, but the authorize redirect reveals it
+once you have the client id:
+
+```bash
+curl -sI "https://api.workos.com/user_management/authorize?client_id=<client_id>\
+&redirect_uri=http://localhost:8000/callback&response_type=code&provider=authkit" \
+  | grep -i '^location'
+```
+
+The remaining steps (3 and 4 — client registration and the resource indicator)
+have no CLI or API equivalent; they are Dashboard-only.
+
 1. **Create (or pick) a WorkOS project/environment.** Use a non-production
    environment first if you have one — you can point `WORKOS_API_BASE_URL` at it.
 2. **Enable AuthKit** and note the **AuthKit domain** (the issuer), e.g.
    `https://<app>.authkit.app`. This becomes `WORKOS_AUTHKIT_DOMAIN`.
-3. **Enable Dynamic Client Registration (DCR).** MCP connector UIs register
-   themselves at runtime; without DCR the Claude/ChatGPT flow can't create a
-   client and sign-in never starts. This is the single most common reason the
-   flow fails — confirm it's on.
-4. **Register this server's MCP URL** as the allowed resource / redirect target
-   per WorkOS's MCP setup, using the exact `PUBLIC_SERVER_URL` value.
+3. **Enable client self-registration** (Dashboard → *Connect* → *Configuration*).
+   MCP connector UIs identify themselves at runtime; with neither mechanism on,
+   the Claude/ChatGPT flow can't create a client and sign-in never starts. This
+   is the single most common reason the flow fails — confirm it's on. There are
+   two, and enabling both is the safe default:
+   - **Client ID Metadata Document (CIMD)** — the current mechanism, added to
+     the MCP spec in November 2025. Clients present a URL describing themselves
+     rather than registering.
+   - **Dynamic Client Registration (DCR)** — the older mechanism, still needed
+     by clients that predate CIMD.
+
+   Neither is reachable from the `workos` CLI or the REST API; the Dashboard is
+   the only place to set them. Confirm from outside — the discovery document
+   advertises what's actually on:
+
+   ```bash
+   curl -s https://<app>.authkit.app/.well-known/oauth-authorization-server \
+     | jq '{registration_endpoint, client_id_metadata_document_supported}'
+   ```
+
+   A missing `registration_endpoint` and absent CIMD flag means neither is
+   enabled, even though everything else below will still pass.
+4. **Register this server's MCP URL as a resource indicator**, using the exact
+   `PUBLIC_SERVER_URL` value. WorkOS compares it as a literal string, so the
+   scheme, host, `/mcp` path, and any trailing slash all count. A value that
+   isn't registered fails the authorize call with `error=invalid_target` —
+   returned as a redirect *mid-sign-in*, so it looks like a connector bug rather
+   than a config error.
 5. **Copy the Client ID** (`client_...`) → `WORKOS_CLIENT_ID`. The API key
    (`sk_...`) is optional for us (JWKS is public) but set it if convenient.
 6. **(Optional) Scopes / audience.** If your tenant issues tokens with an `aud`
@@ -169,7 +212,8 @@ the capability URL) and PER-23 (onboard friend tenants).
 | Symptom | Likely cause |
 |---|---|
 | `/mcp` returns `404` instead of `401` | Not all three required vars set → still in capability-path mode. |
-| Connector never shows a sign-in page | DCR not enabled in WorkOS, or the connector couldn't fetch/parse the protected-resource metadata. |
+| Connector never shows a sign-in page | Neither CIMD nor DCR enabled in WorkOS, or the connector couldn't fetch/parse the protected-resource metadata. Check the authorization-server discovery document for `registration_endpoint` / `client_id_metadata_document_supported` (Part A step 3). |
+| Sign-in redirects to `error=invalid_target` | `PUBLIC_SERVER_URL` isn't registered as a resource indicator in WorkOS, or differs from the registered value by a trailing slash or the `/mcp` path. Registration is a literal string match (Part A step 4). |
 | Sign-in works but `/mcp` calls 401 | Token audience/issuer mismatch — check `WORKOS_AUDIENCE` (unset it if your tenant doesn't set `aud`) and that `WORKOS_AUTHKIT_DOMAIN` equals the token `iss`. |
 | 401 with "insufficient scope" behavior | `WORKOS_REQUIRED_SCOPES` demands scopes the token doesn't carry — relax it or grant the scopes. |
 | Metadata resource URL doesn't match | `PUBLIC_SERVER_URL` differs from the deploy's real origin — they must match exactly. |

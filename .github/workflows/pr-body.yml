@@ -3,6 +3,7 @@ name: PR body
 # Enforces that the PR description follows .github/pull_request_template.md:
 # every required section present and filled in (not left as the empty prompt),
 # and a Linear link in the Ticket section. See .github/scripts/check_pr_body.py.
+# A "fix: ..." PR may omit the Ticket section — hence the title is passed in too.
 #
 # Runs on `edited` too, so fixing the body re-checks without a new commit push.
 
@@ -28,4 +29,5 @@ jobs:
         # crafted PR description can't inject commands.
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: python .github/scripts/check_pr_body.py

@@ -5,6 +5,11 @@ Reads the PR body from the PR_BODY env var and exits non-zero if any required
 section is missing or left empty (i.e. only the template's HTML-comment prompt,
 or blank). The Ticket section must also carry a Linear issue link.
 
+Exception: a "fix: ..." PR (small correction, no Linear issue — see
+.github/workflows/pr-title.yml) may omit the Ticket section entirely. Every
+other section is still required, and a Ticket section that *is* filled in must
+still carry a Linear link. The title arrives via the PR_TITLE env var.
+
 Kept deliberately simple: it verifies the *shape* is filled in, not the prose.
 """
 
@@ -20,6 +25,9 @@ REQUIRED_SECTIONS = [
     "Testing",
     "Deploy impact",
 ]
+
+# Mirrors the "fix: " arm of the title regex in .github/workflows/pr-title.yml.
+FIX_TITLE_RE = re.compile(r"^fix: .+")
 
 
 def _strip_comments(text: str) -> str:
@@ -40,12 +48,21 @@ def _split_sections(body: str) -> dict[str, str]:
     return sections
 
 
-def check(body: str) -> list[str]:
+def check(body: str, title: str = "") -> list[str]:
     sections = _split_sections(body)
     errors: list[str] = []
 
+    # "fix: ..." PRs are the escape hatch for corrections too small to warrant a
+    # Linear issue, so they may drop the Ticket section.
+    ticket_optional = bool(FIX_TITLE_RE.match(title.strip()))
+
     for name in REQUIRED_SECTIONS:
         key = name.lower()
+        # On a fix: PR the section may be deleted or left as the empty prompt;
+        # either way it isn't required. A Ticket that *is* filled in still gets
+        # the Linear-link check below.
+        if key == "ticket" and ticket_optional:
+            continue
         if key not in sections:
             errors.append(f"missing section: ## {name}")
             continue
@@ -75,7 +92,8 @@ def check(body: str) -> list[str]:
 
 def main() -> int:
     body = os.environ.get("PR_BODY", "") or ""
-    errors = check(body)
+    title = os.environ.get("PR_TITLE", "") or ""
+    errors = check(body, title)
     if errors:
         print("PR body does not follow .github/pull_request_template.md:")
         for err in errors:

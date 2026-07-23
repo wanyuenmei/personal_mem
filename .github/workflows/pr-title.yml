@@ -4,6 +4,9 @@ name: PR title
 # .github/pull_request_template.md:  "<ticket>: <short description>"
 # e.g. "PER-7: add tests and tool error handling".
 #
+# "fix: <short description>" is also accepted, for small corrections that don't
+# warrant their own Linear issue.
+#
 # Runs on `edited` too (not just opened/synchronize) so a title fixed after
 # the fact re-checks without needing a new commit push.
 
@@ -25,9 +28,9 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           echo "PR title: $TITLE"
-          if echo "$TITLE" | grep -Eq '^[A-Z][A-Z0-9]*-[0-9]+: .+'; then
-            echo "OK: title matches '<ticket>: <short description>'."
+          if echo "$TITLE" | grep -Eq '^([A-Z][A-Z0-9]*-[0-9]+|fix): .+'; then
+            echo "OK: title matches '<ticket>: <short description>' or 'fix: <short description>'."
           else
-            echo "::error::PR title must be '<ticket>: <short description>' — a Linear id, a colon, a space, then a description. e.g. 'PER-7: add tests and tool error handling'. Got: '$TITLE'"
+            echo "::error::PR title must be '<ticket>: <short description>' — a Linear id, a colon, a space, then a description. e.g. 'PER-7: add tests and tool error handling'. Small corrections may use 'fix: <short description>'. Got: '$TITLE'"
             exit 1
           fi
