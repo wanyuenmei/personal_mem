@@ -1,4 +1,4 @@
-"""Unit tests for the M2.2 WorkOS OAuth resource-server wiring.
+"""Unit tests for the WorkOS OAuth resource-server wiring.
 
 Token verification is exercised end-to-end (signature -> claim validation ->
 principal) using locally-minted HS256 tokens and an injected signing-key
@@ -33,7 +33,6 @@ def make_verifier(**overrides):
         issuer=ISSUER,
         signing_key_resolver=lambda _token: SECRET,
         algorithms=("HS256",),
-        user_id_prefix="workos_",
     )
     kwargs.update(overrides)
     return WorkOSTokenVerifier(**kwargs)
@@ -120,6 +119,38 @@ def test_scopes_as_list_claim():
     assert set(result.scopes) == {"a", "b"}
 
 
+def test_issuer_trailing_slash_tolerated():
+    # WorkOS's issuer has no trailing slash, but a stray one on either side must
+    # not turn a valid token into a 401.
+    v = make_verifier(issuer="https://example.authkit.app")
+    assert verify(v, mint(base_claims(iss="https://example.authkit.app/"))) is not None
+    v2 = make_verifier(issuer="https://example.authkit.app/")
+    assert verify(v2, mint(base_claims(iss="https://example.authkit.app"))) is not None
+
+
+def test_leeway_allows_small_clock_skew():
+    now = int(time.time())
+    # Expired 10s ago: rejected with no leeway, accepted within a 30s tolerance.
+    assert verify(make_verifier(), mint(base_claims(exp=now - 10))) is None
+    assert verify(make_verifier(leeway=30), mint(base_claims(exp=now - 10))) is not None
+
+
+def test_whitespace_subject_rejected():
+    v = make_verifier()
+    assert verify(v, mint(base_claims(sub="   "))) is None
+
+
+def test_signing_key_resolver_error_returns_none_and_logs(caplog):
+    def boom(_token):
+        raise jwt.PyJWKClientError("cannot reach JWKS")
+
+    v = make_verifier(signing_key_resolver=boom)
+    with caplog.at_level("WARNING", logger="context_layer.auth"):
+        assert verify(v, mint(base_claims())) is None
+    # A JWKS/infra failure must be surfaced, not silently swallowed as a bad token.
+    assert any("resolve signing key" in r.message for r in caplog.records)
+
+
 def test_jwks_url_shape():
     assert jwks_url_for("client_XYZ", "https://api.workos.com") == (
         "https://api.workos.com/sso/jwks/client_XYZ"
@@ -171,6 +202,15 @@ def test_resolve_user_id_uses_prefixed_subject_when_authenticated(monkeypatch):
 
 def test_resolve_user_id_default_when_subject_empty():
     reset = _set_principal(None)
+    try:
+        assert identity.resolve_user_id(None) == DEFAULT_USER_ID
+    finally:
+        _reset_principal(reset)
+
+
+def test_resolve_user_id_default_when_subject_whitespace():
+    # A whitespace-only subject must not produce a "workos_ " namespace.
+    reset = _set_principal("   ")
     try:
         assert identity.resolve_user_id(None) == DEFAULT_USER_ID
     finally:

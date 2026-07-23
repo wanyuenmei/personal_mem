@@ -153,6 +153,10 @@ WORKOS_AUDIENCE = os.getenv("WORKOS_AUDIENCE", "").strip()
 # Prefix applied to the token subject to form the mem0 user_id, so authenticated
 # tenants can never collide with the single-tenant DEFAULT_USER_ID namespace.
 WORKOS_USER_ID_PREFIX = os.getenv("WORKOS_USER_ID_PREFIX", "workos_")
+# Clock-skew tolerance (seconds) for token exp/iat validation. A small default
+# so minor drift between WorkOS and this server doesn't reject otherwise-valid
+# tokens near their expiry boundary; set 0 to disable.
+WORKOS_LEEWAY = int(os.getenv("WORKOS_LEEWAY", "60"))
 
 
 def workos_required_scopes() -> list[str]:
