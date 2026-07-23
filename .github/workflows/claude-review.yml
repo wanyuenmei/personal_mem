@@ -45,7 +45,12 @@ jobs:
           # Post findings as a tracked review comment tied to this PR.
           track_progress: true
           prompt: |
-            Review this pull request. Focus on, in priority order:
+            Review this pull request. Start by getting the whole change in
+            one pass: run `git diff --stat` for the list of changed files and
+            `git diff` for the full diff (the action gives you the exact base
+            ref to diff against). Review from that diff, and only Read a file
+            when you need more surrounding context than the diff shows. Focus
+            on, in priority order:
             - Correctness: real bugs, unhandled errors, broken edge cases.
             - Tenant isolation & security: anything that could leak one
               user's memory to another, weaken the auth guards, or mishandle
@@ -56,6 +61,16 @@ jobs:
             Be concrete and cite file:line. Skip nits and style already
             enforced by ruff. If the PR looks good, say so briefly rather than
             inventing concerns.
+          # claude_args (one flag per line; keep comments out of the block
+          # scalar — lines under `claude_args: |` are passed verbatim as args):
+          #  - allow only read-only `git diff` so the reviewer reads the whole
+          #    diff at once instead of file-by-file; deny the git write verbs
+          #    so a review can never mutate the repo. The job's contents:read
+          #    token already blocks pushes — this makes read-only explicit.
+          #  - max-turns 30: headroom; with diff-based review a run needs far
+          #    fewer turns than the old file-by-file pass that hit the 15 cap.
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 15
+            --max-turns 30
+            --allowedTools "Bash(git diff:*)"
+            --disallowedTools "Bash(git add:*),Bash(git commit:*),Bash(git rm:*)"
