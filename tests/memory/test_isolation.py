@@ -95,3 +95,62 @@ def test_search_rejects_falsy_user_id(store: ContextStore, bad_user_id) -> None:
 def test_all_rejects_falsy_user_id(store: ContextStore, bad_user_id) -> None:
     with pytest.raises(TenantIsolationError):
         store.all(user_id=bad_user_id)
+
+
+def test_delete_removes_only_the_owners_memory(store: ContextStore) -> None:
+    """Proves the tenant-safe delete against a real store: an owner can delete
+    their own memory, and it actually disappears from get_all. Uses a dedicated
+    user_id so it can't perturb the A/B seed the other tests assert on."""
+    owner = "delete-test-owner"
+    store.add("The user's lucky number is seven.", user_id=owner, scope="general")
+
+    [row] = store.all(user_id=owner)
+    result = store.delete(row["id"], user_id=owner)
+
+    assert result == {"deleted": True, "id": row["id"]}
+    assert store.all(user_id=owner) == []
+
+
+def test_delete_refuses_to_cross_tenants(store: ContextStore) -> None:
+    """A different tenant cannot delete a memory it doesn't own, even holding the
+    exact id — the guard raises and the memory survives."""
+    owner = "delete-test-owner-b"
+    intruder = "delete-test-intruder"
+    store.add("The user's passphrase is open sesame.", user_id=owner, scope="general")
+
+    [row] = store.all(user_id=owner)
+    with pytest.raises(TenantIsolationError):
+        store.delete(row["id"], user_id=intruder)
+
+    survivors = _texts(store.all(user_id=owner))
+    assert any("open sesame" in t for t in survivors), survivors
+
+
+def test_delete_all_wipes_only_the_targeted_tenant(store: ContextStore) -> None:
+    """delete_all is scoped by the user_id filter: it must empty the victim's
+    memories entirely while leaving another tenant's memories untouched."""
+    victim = "delete-all-victim"
+    bystander = "delete-all-bystander"
+    store.add("The victim's first secret.", user_id=victim, scope="general")
+    store.add("The victim's second secret.", user_id=victim, scope="dietary")
+    store.add("The bystander's own secret.", user_id=bystander, scope="general")
+
+    result = store.delete_all(user_id=victim)
+
+    assert result == {"deleted_all": True, "user_id": victim, "count": 2}
+    assert store.all(user_id=victim) == []
+    assert _texts(store.all(user_id=bystander)), "bystander's memory must survive"
+
+
+@pytest.mark.parametrize("bad_user_id", FALSY_USER_IDS)
+def test_delete_rejects_falsy_user_id(store: ContextStore, bad_user_id) -> None:
+    with pytest.raises(TenantIsolationError):
+        store.delete("any-id", user_id=bad_user_id)
+
+
+@pytest.mark.parametrize("bad_user_id", FALSY_USER_IDS)
+def test_delete_all_rejects_falsy_user_id(store: ContextStore, bad_user_id) -> None:
+    """The blast radius here is every tenant, so the guard must hold: a falsy
+    user_id must never reach mem0's delete_all."""
+    with pytest.raises(TenantIsolationError):
+        store.delete_all(user_id=bad_user_id)
