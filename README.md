@@ -66,6 +66,35 @@ Set `EXTRACTION_MODE` in `.env`:
 Embeddings always run **locally** (fastembed, 384-dim), so retrieval never
 depends on a cloud provider.
 
+## Backfill your history
+
+Seed the store from a Claude data export (Settings → export) instead of starting
+empty. Point the importer at the `conversations.json` file, the unzipped export
+directory, or the raw `.zip`:
+
+```bash
+# Dry run first — prints an estimate (conversations, messages, approx tokens/cost)
+# and imports nothing:
+uv run python scripts/backfill.py ~/Downloads/claude-export.zip
+
+# Exercise the whole pipeline at zero cost (stores raw, no LLM) — for testing:
+uv run python scripts/backfill.py ~/Downloads/claude-export.zip --extractor none --yes
+
+# Import for real once the estimate looks right:
+EXTRACTION_MODE=anthropic uv run python scripts/backfill.py \
+    ~/Downloads/claude-export.zip --limit 20 --yes
+```
+
+Each conversation is fed through mem0 extraction and tagged with a scope
+(inferred per conversation, or forced with `--scope`). A full import is the most
+expensive operation here — every conversation costs extraction tokens — so it
+never runs without `--yes`, and `--limit N` caps how many conversations go
+through. `--extractor` picks the fact extractor per run: `auto` (default,
+follows `EXTRACTION_MODE`), `llm` (force LLM extraction), or `none` (store raw
+with no LLM — a 0-cost path that also skips scope inference, for testing the
+pipeline). Imported memories carry `source`/`source_id` provenance in their
+metadata. Then `scripts/inspect_db.py` shows what landed.
+
 ## Connect an AI client
 
 **Claude Desktop / Claude Code (local, stdio)** — add to your MCP config:
