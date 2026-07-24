@@ -79,6 +79,11 @@ PG_COLLECTION = os.getenv("PG_COLLECTION", "context_layer").strip()
 
 # --- Paths / identity -------------------------------------------------------
 DATA_DIR = os.path.expanduser(os.getenv("CONTEXT_LAYER_DATA", "~/.context-layer"))
+# The single-tenant mem0 namespace, used only when a request carries no
+# authenticated principal — stdio, the capability-path deploy, or OAuth simply
+# not configured. Under WorkOS OAuth, resolve_user_id returns the token's
+# subject instead and this is never read, so unsetting USER_ID on an OAuth
+# deploy changes nothing: the fallback below still applies.
 DEFAULT_USER_ID = os.getenv("USER_ID", "mei")
 
 # --- MCP transport ----------------------------------------------------------
