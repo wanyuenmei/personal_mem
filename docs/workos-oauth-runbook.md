@@ -1,12 +1,8 @@
 # WorkOS AuthKit OAuth — setup & live-verification runbook
 
-**Status:** the OAuth resource-server code is merged and unit-tested, but it has
-**never run against a real WorkOS tenant.** This runbook is the checklist for
-turning it on with real credentials and confirming the end-to-end connector flow
-(discovery + dynamic client registration + sign-in) works in the Claude and
-ChatGPT connector UIs. Completing the checklist at the bottom is the acceptance
-for PER-19 and unblocks retiring the capability URL (PER-22) and onboarding
-friend tenants (PER-23).
+**Status:** OAuth mode has been live on the deploy since 2026-07-24. Discovery, the 401 handshake, client registration, a real WorkOS token through `WorkOSTokenVerifier`, and per-tenant namespacing are all confirmed against a live tenant — the acceptance for PER-19, which is closed. Two boxes at the bottom remain open: the ChatGPT connector round-trip, and the isolation spot check, which needs a second signed-in user (PER-23).
+
+What remains of this runbook is the setup procedure — for a fresh environment, or for the move off the current one. That move matters: the live tenant is a WorkOS **staging sandbox**, and re-creating it as a production environment reissues every subject, which renames every memory namespace. Doing it before anyone else is onboarded costs nothing; doing it after strands their memories.
 
 ## Provider decision (PER-19)
 
@@ -191,21 +187,19 @@ holds end-to-end, not just in unit tests.
 
 ## Verification checklist (PER-19 acceptance)
 
-- [ ] `scripts/verify_oauth.py` passes against the live deploy (discovery + 401).
-- [ ] Protected-resource metadata points at the real AuthKit issuer and the exact
+- [x] `scripts/verify_oauth.py` passes against the live deploy (discovery + 401).
+- [x] Protected-resource metadata points at the real AuthKit issuer and the exact
       `PUBLIC_SERVER_URL`.
-- [ ] Claude connector: plain `/mcp` URL → WorkOS sign-in → connected → a
+- [x] Claude connector: plain `/mcp` URL → WorkOS sign-in → connected → a
       `add_memory`/`search_memory` round-trip works.
 - [ ] ChatGPT connector: same round-trip works.
-- [ ] Deploy logs show authenticated calls resolving to `workos_<subject>`, not
+- [x] Deploy logs show authenticated calls resolving to `workos_<subject>`, not
       `DEFAULT_USER_ID`.
 - [ ] Two distinct users get isolated memory namespaces (C4).
 - [ ] Spend watched during the run (extraction bills the shared Anthropic key —
       see PER-23).
 
-When every box is ticked: drop the "not yet verified against a live WorkOS
-tenant" caveat in `README.md`, move PER-19 to Done, and pick up PER-22 (retire
-the capability URL) and PER-23 (onboard friend tenants).
+The open boxes need a second person, so they gate PER-23 (onboard friend tenants) rather than PER-19. Run C3 and C4 as part of that onboarding, after the move off the sandbox environment.
 
 ## Troubleshooting
 
