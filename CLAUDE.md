@@ -18,6 +18,12 @@
   other repo files shouldn't point at them. (PR *descriptions* still link the
   Linear ticket — that's issue traceability, not a doc link.)
 
+## Prose & markdown
+
+- **Don't hard-wrap prose. Write one line per paragraph.** This is required for anything posted to GitHub — PR descriptions, issue bodies, review comments — because GitHub Flavored Markdown renders a single newline as a `<br>` there, so wrapped text shows as narrow ragged lines that never use the page width. Repo `.md` files render the same either way (standard Markdown treats a single newline as a space), but new prose there is unwrapped too, for one consistent habit.
+- **Leave already-wrapped prose alone.** Much of this file, `README.md`, and `docs/` predates the rule. Don't reflow a file just to convert it — that rewrites `git blame` for every prose line and buries the real change. Files convert as their paragraphs are edited for other reasons.
+- Tables, fenced code blocks, and list items keep their own line structure; this is about paragraph text only.
+
 ## Pull requests
 
 When opening a PR, follow `.github/pull_request_template.md`. Specifically:
