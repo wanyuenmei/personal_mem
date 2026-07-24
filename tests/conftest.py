@@ -17,7 +17,7 @@ store, not a mock — the whole point of that test is to prove the filter
 actually holds in the store, not merely that the Python call sites look right.
 
 The `fake_mem0` fixture below is the opposite tack, for the PER-7 tests
-(scope filtering, config shape, tool error handling): those exercise our own
+(tenant filtering, config shape, tool error handling): those exercise our own
 code against a fully in-memory mem0 double so they never touch a real
 backend at all. Both styles coexist — tests opt into `fake_mem0` when they
 want the double; the isolation test just constructs a real ContextStore.

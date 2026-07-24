@@ -1,10 +1,10 @@
 """Batch extraction runner: normalized conversations → mem0.
 
 Feeds each conversation through ``ContextStore.add()`` so an export becomes
-extracted, scope-tagged memories. A full history import is the single most
-expensive operation in the product (every conversation costs Anthropic tokens),
-so the CLI (``scripts/backfill.py``) previews an ``estimate`` and only runs on an
-explicit opt-in.
+extracted memories. A full history import is the single most expensive operation
+in the product (every conversation costs Anthropic tokens), so the CLI
+(``scripts/backfill.py``) previews an ``estimate`` and only runs on an explicit
+opt-in.
 
 Idempotency/resume is a separate concern (PER-29): here we stamp
 ``source``/``source_id`` provenance into each memory's metadata, which that
@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from context_layer.ingest.normalized import Conversation
-from context_layer.ingest.scope import infer_scope
 from context_layer.memory import TenantIsolationError
 
 logger = logging.getLogger("context_layer.ingest.runner")
@@ -28,9 +27,8 @@ logger = logging.getLogger("context_layer.ingest.runner")
 _APPROX_USD_PER_MTOK = 1.0
 _CHARS_PER_TOKEN = 4
 
-ScopeFn = Callable[[Conversation], str]
-# on_progress(index, total, conversation, resolved_scope, facts_added_for_it)
-ProgressFn = Callable[[int, int, Conversation, str, int], None]
+# on_progress(index, total, conversation, facts_added_for_it)
+ProgressFn = Callable[[int, int, Conversation, int], None]
 
 
 @dataclass
@@ -60,23 +58,21 @@ def estimate(
     conversations: list[Conversation],
     *,
     with_extraction: bool = True,
-    with_scope_inference: bool = True,
     limit: Optional[int] = None,
 ) -> Estimate:
     """Preview the size and rough cost of importing ``conversations``.
 
     Mirrors what ``run_backfill`` will actually do (same ``limit``, same
     empty-conversation skipping) so the preview matches the run. Each non-empty
-    conversation costs one extraction call (unless ``with_extraction`` is off —
-    the 0-cost path) plus one scope-inference call when ``with_scope_inference``.
+    conversation costs one extraction call, unless ``with_extraction`` is off —
+    the 0-cost path.
     """
     convs = _limited(conversations, limit)
     n_msgs = sum(len(c.messages) for c in convs)
     chars = sum(len(m.text) for c in convs for m in c.messages)
     approx_tokens = chars // _CHARS_PER_TOKEN
     non_empty = sum(1 for c in convs if c.messages)
-    per_conv_calls = (1 if with_extraction else 0) + (1 if with_scope_inference else 0)
-    calls = non_empty * per_conv_calls
+    calls = non_empty if with_extraction else 0
     cost = (approx_tokens / 1_000_000) * _APPROX_USD_PER_MTOK if with_extraction else 0.0
     return Estimate(
         conversations=len(convs),
@@ -100,24 +96,19 @@ def run_backfill(
     store,
     user_id: str,
     *,
-    scope: Optional[str] = None,
-    scope_fn: ScopeFn = infer_scope,
     limit: Optional[int] = None,
     infer: Optional[bool] = None,
     on_progress: Optional[ProgressFn] = None,
 ) -> BackfillResult:
     """Import ``conversations`` into ``store`` for ``user_id``.
 
-    ``scope`` forces a fixed scope for every conversation (and skips
-    ``scope_fn``); otherwise ``scope_fn`` resolves a scope per conversation.
     ``infer`` chooses the fact extractor and is passed straight to
     ``store.add``: ``True`` forces LLM extraction, ``False`` stores raw with no
     LLM (the 0-cost testing path), ``None`` follows the configured
     EXTRACTION_MODE.
     A per-conversation failure is counted and logged via ``on_progress`` but does
     not abort the run — one bad conversation shouldn't sink a whole import.
-    ``store`` and ``scope_fn`` are injected so tests never touch a real backend
-    or the network.
+    ``store`` is injected so tests never touch a real backend or the network.
     """
     convs = _limited(conversations, limit)
     total = len(convs)
@@ -126,13 +117,11 @@ def run_backfill(
         if not conv.messages:
             skipped += 1
             continue
-        resolved_scope = scope if scope is not None else scope_fn(conv)
         messages = [{"role": m.role, "content": m.text} for m in conv.messages]
         try:
             result = store.add(
                 messages,
                 user_id=user_id,
-                scope=resolved_scope,
                 extra_metadata={"source": conv.source, "source_id": conv.source_id},
                 infer=infer,
             )
@@ -155,7 +144,7 @@ def run_backfill(
             failures += 1
             n = 0
         if on_progress is not None:
-            on_progress(i, total, conv, resolved_scope, n)
+            on_progress(i, total, conv, n)
     return BackfillResult(
         conversations=total,
         facts_added=facts,

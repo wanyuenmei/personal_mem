@@ -17,10 +17,8 @@ def main() -> None:
     print(f"user_id={user_id}  mode={EXTRACTION_MODE}  total={len(rows)} memories\n")
     for i, r in enumerate(rows, 1):
         text = r.get("memory") or r.get("text") or str(r)
-        meta = r.get("metadata") or {}
-        scope = meta.get("scope", "general")
         created = r.get("created_at", "")
-        print(f"{i:>2}. [{scope}] {text}")
+        print(f"{i:>2}. {text}")
         if created:
             print(f"      created: {created}   id: {r.get('id', '')}")
 

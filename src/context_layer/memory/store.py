@@ -1,8 +1,11 @@
 """Thin wrapper around mem0 so the rest of the app never touches mem0 directly.
 
-Every memory carries a `scope` in its metadata from day one. Scopes aren't
-*enforced* yet (that's the future consent layer), but modeling them now — as the
-brief argues, the scope schema is the spine — avoids a painful migration later.
+Memories carry no category tag. Scope tagging was removed (PER-63) until the
+consent layer defines a vocabulary: nothing read the tag, and mem0 keeps the
+fact text and its embedding, so categories stay derivable whenever a grant
+actually needs them. Treat that future label like an embedding — computed from
+the text, rebuildable, never the source of truth — and materialize it out of
+band rather than on this write path.
 
 --- Tenant isolation (PER-5) --------------------------------------------------
 Isolation currently rests entirely on passing `filters={"user_id": ...}` (or
@@ -87,7 +90,6 @@ class ContextStore:
         self,
         content: "str | list[dict]",
         user_id: Optional[str] = None,
-        scope: str = "general",
         extra_metadata: Optional[dict] = None,
         infer: Optional[bool] = None,
     ) -> dict:
@@ -96,7 +98,7 @@ class ContextStore:
         both, and passing the turns keeps conversation structure for better
         extraction than a flattened blob. With extraction on, mem0 distills/dedups
         facts; with EXTRACTION_MODE=none it stores the content and embeds it.
-        `extra_metadata`, if given, is merged alongside the scope tag (e.g. the
+        `extra_metadata`, if given, is stored as the memory's metadata (e.g. the
         backfill importer stamps source/source_id provenance).
 
         `infer` overrides the extraction setting for THIS call: True forces LLM
@@ -104,13 +106,10 @@ class ContextStore:
         e.g. for testing the ingest pipeline without paying for extraction).
         None (the default) follows EXTRACTION_MODE via infer_enabled()."""
         user_id = _require_user_id(user_id, op="add a memory")
-        metadata = {"scope": scope}
-        if extra_metadata:
-            metadata.update(extra_metadata)
         return self._mem.add(
             content,
             user_id=user_id,
-            metadata=metadata,
+            metadata=dict(extra_metadata) if extra_metadata else {},
             infer=infer_enabled() if infer is None else infer,
         )
 
@@ -119,17 +118,10 @@ class ContextStore:
         query: str,
         user_id: Optional[str] = None,
         limit: int = 5,
-        scope: Optional[str] = None,
     ) -> list[dict]:
-        """Semantic search over a user's memories, newest-relevant first.
-        If `scope` is given, the filter is pushed into the store query so the
-        top-k ranking happens WITHIN that scope (rather than slicing top-k after
-        the fact, which could return fewer than `limit`, or none)."""
+        """Semantic search over a user's memories, newest-relevant first."""
         user_id = _require_user_id(user_id, op="search memories")
-        filters = {"user_id": user_id}
-        if scope is not None:
-            filters["scope"] = scope
-        res = self._mem.search(query, filters=filters, top_k=limit)
+        res = self._mem.search(query, filters={"user_id": user_id}, top_k=limit)
         return _as_results(res)
 
     def all(self, user_id: Optional[str] = None) -> list[dict]:

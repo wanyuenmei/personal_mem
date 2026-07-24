@@ -1,11 +1,11 @@
 """Backfill the memory store from a Claude data export.
 
-Parse an export → infer a scope per conversation → extract + store via mem0.
-A full import is the most expensive operation in the product, so this previews
-an estimate and only runs when you pass --yes.
+Parse an export → extract + store via mem0. A full import is the most expensive
+operation in the product, so this previews an estimate and only runs when you
+pass --yes.
 
 Run:
-  python scripts/backfill.py <export> [--scope S] [--limit N] [--user-id U] [--yes]
+  python scripts/backfill.py <export> [--limit N] [--user-id U] [--yes]
 
 <export> is the conversations.json file, the unzipped export directory, or the
 raw export .zip. Without --yes it prints the estimate and stops (a dry run).
@@ -25,9 +25,9 @@ from context_layer.memory import ContextStore
 _EXTRACTOR_INFER = {"auto": None, "llm": True, "none": False}
 
 
-def _progress(i: int, total: int, conv, scope: str, n_facts: int) -> None:
+def _progress(i: int, total: int, conv, n_facts: int) -> None:
     title = conv.title or "(untitled)"
-    print(f"[{i}/{total}] {title[:60]} → scope={scope} ({n_facts} facts)")
+    print(f"[{i}/{total}] {title[:60]} ({n_facts} facts)")
 
 
 def main(argv=None) -> int:
@@ -43,11 +43,6 @@ def main(argv=None) -> int:
         default="auto",
         help="fact extractor: 'auto' follows EXTRACTION_MODE, 'llm' forces LLM "
         "extraction, 'none' stores raw with no LLM (0-cost, for testing)",
-    )
-    parser.add_argument(
-        "--scope",
-        default=None,
-        help="force a fixed scope for all imported facts (skips per-conversation inference)",
     )
     parser.add_argument(
         "--limit", type=int, default=None, help="import at most N conversations"
@@ -75,39 +70,20 @@ def main(argv=None) -> int:
 
     # Will fact-extraction actually run this pass? (drives the cost estimate.)
     extracting = infer_enabled() if infer is None else infer
-    # Scope inference is itself an LLM call, so it only runs on a paid pass with
-    # no forced --scope. A 0-cost pass skips it and falls back to a fixed scope.
-    inferring_scope = args.scope is None and extracting and EXTRACTION_MODE == "anthropic"
-    run_scope = args.scope if args.scope is not None or inferring_scope else "general"
 
-    est = estimate(
-        conversations,
-        with_extraction=extracting,
-        with_scope_inference=inferring_scope,
-        limit=args.limit,
-    )
+    est = estimate(conversations, with_extraction=extracting, limit=args.limit)
 
-    call_parts = (["extraction"] if extracting else []) + (
-        ["scope inference"] if inferring_scope else []
-    )
-    if args.scope is not None:
-        scope_desc = f"fixed={args.scope}"
-    elif inferring_scope:
-        scope_desc = "inferred per conversation"
-    else:
-        scope_desc = f"fixed={run_scope} (no inference)"
-    spending = EXTRACTION_MODE == "anthropic" and (extracting or inferring_scope)
+    spending = EXTRACTION_MODE == "anthropic" and extracting
 
     print(f"Source:            {args.export}")
     print(f"Parsed:            {len(conversations)} conversations")
     print(f"To import:         {est.conversations} conversations, {est.messages} messages")
     print(f"Approx input tok:  {est.approx_input_tokens:,}")
-    print(f"LLM calls:         ~{est.llm_calls} ({' + '.join(call_parts) or 'none'})")
+    print(f"LLM calls:         ~{est.llm_calls} ({'extraction' if extracting else 'none'})")
     print(f"Approx cost:       ~${est.approx_cost_usd:.2f}  (rough input-token estimate)")
     print(f"Extractor:         {args.extractor} ({'LLM' if extracting else '0-cost, raw store'})")
     warn = "  ⚠ real Anthropic spend" if spending else ""
     print(f"Extraction mode:   {EXTRACTION_MODE}{warn}")
-    print(f"Scope:             {scope_desc}")
 
     if not args.yes:
         print("\nDry run — nothing imported. Re-run with --yes to execute.")
@@ -119,7 +95,6 @@ def main(argv=None) -> int:
         conversations,
         store,
         args.user_id,
-        scope=run_scope,
         limit=args.limit,
         infer=infer,
         on_progress=_progress,

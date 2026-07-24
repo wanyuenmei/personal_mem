@@ -42,10 +42,10 @@ def _seed(store: ContextStore) -> None:
     missing or broken, this test would actually see the leak, rather than the
     embedder itself coincidentally keeping the two tenants' texts apart.
     """
-    store.add("The user's pet is named Biscuit.", user_id=USER_A, scope="general")
-    store.add("The user prefers dark roast coffee, no sugar.", user_id=USER_A, scope="dietary")
-    store.add("The user's pet is named Whiskers.", user_id=USER_B, scope="general")
-    store.add("The user prefers green tea.", user_id=USER_B, scope="dietary")
+    store.add("The user's pet is named Biscuit.", user_id=USER_A)
+    store.add("The user prefers dark roast coffee, no sugar.", user_id=USER_A)
+    store.add("The user's pet is named Whiskers.", user_id=USER_B)
+    store.add("The user prefers green tea.", user_id=USER_B)
 
 
 def _texts(rows: list[dict]) -> list[str]:
@@ -102,7 +102,7 @@ def test_delete_removes_only_the_owners_memory(store: ContextStore) -> None:
     their own memory, and it actually disappears from get_all. Uses a dedicated
     user_id so it can't perturb the A/B seed the other tests assert on."""
     owner = "delete-test-owner"
-    store.add("The user's lucky number is seven.", user_id=owner, scope="general")
+    store.add("The user's lucky number is seven.", user_id=owner)
 
     [row] = store.all(user_id=owner)
     result = store.delete(row["id"], user_id=owner)
@@ -116,7 +116,7 @@ def test_delete_refuses_to_cross_tenants(store: ContextStore) -> None:
     exact id — the guard raises and the memory survives."""
     owner = "delete-test-owner-b"
     intruder = "delete-test-intruder"
-    store.add("The user's passphrase is open sesame.", user_id=owner, scope="general")
+    store.add("The user's passphrase is open sesame.", user_id=owner)
 
     [row] = store.all(user_id=owner)
     with pytest.raises(TenantIsolationError):
@@ -131,9 +131,9 @@ def test_delete_all_wipes_only_the_targeted_tenant(store: ContextStore) -> None:
     memories entirely while leaving another tenant's memories untouched."""
     victim = "delete-all-victim"
     bystander = "delete-all-bystander"
-    store.add("The victim's first secret.", user_id=victim, scope="general")
-    store.add("The victim's second secret.", user_id=victim, scope="dietary")
-    store.add("The bystander's own secret.", user_id=bystander, scope="general")
+    store.add("The victim's first secret.", user_id=victim)
+    store.add("The victim's second secret.", user_id=victim)
+    store.add("The bystander's own secret.", user_id=bystander)
 
     result = store.delete_all(user_id=victim)
 
