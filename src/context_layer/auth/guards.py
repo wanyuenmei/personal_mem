@@ -46,13 +46,16 @@ class CapabilityPathGuard:
     """Per-client capability paths + a global rate limit.
 
     When tokens are configured, each client connects at its own secret path
-    /<token>/mcp; the guard matches the token, strips the prefix, stamps the
-    client label into scope["state"] (per-client attribution for the access
-    log), and forwards to the inner app at /mcp. Everything else — including
-    bare /mcp — gets a 404. We deliberately never answer 401: MCP clients treat
-    401 as "this server wants OAuth" and launch a sign-in flow that can't
-    succeed here.
+    /<token>/mcp — or opens the memory browser at /<token>/dashboard — and the
+    guard matches the token, strips the prefix, stamps the client label into
+    scope["state"] (per-client attribution for the access log), and forwards to
+    the inner app at /mcp or /dashboard. Everything else — including the bare
+    paths — gets a 404. We deliberately never answer 401: MCP clients treat 401
+    as "this server wants OAuth" and launch a sign-in flow that can't succeed
+    here.
     """
+
+    _INNER_PATHS = ("/mcp", "/dashboard")
 
     def __init__(self, app, tokens: dict[str, str], rpm: int) -> None:
         self.app = app
@@ -77,7 +80,7 @@ class CapabilityPathGuard:
             path = scope.get("path", "")
             for tok, label in self.tokens.items():
                 prefix = f"/{tok}"
-                if path.startswith(prefix + "/mcp"):
+                if any(path.startswith(prefix + p) for p in self._INNER_PATHS):
                     scope = dict(scope)
                     scope["path"] = path[len(prefix):]
                     scope["raw_path"] = scope["path"].encode()

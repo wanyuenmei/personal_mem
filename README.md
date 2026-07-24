@@ -52,6 +52,17 @@ What the credential identifies is **you, not the app**: sign in from Claude, Cur
 
 Then [steer each client's instructions](#steer-your-ai-client) so it actually calls the store.
 
+## See your memories in the browser
+
+`/dashboard` is a read-only memory browser: everything the store holds about you, newest first, with timestamps and as-you-type search. It's served by the same HTTP transport as `/mcp`, behind whichever auth mode the deploy already runs:
+
+- **OAuth deploy:** open `https://<domain>/dashboard` and sign in with the same WorkOS account your AI clients use — the page shows exactly the namespace they write to. Sign-in needs two extra env vars (`WORKOS_API_KEY` and `WORKOS_COOKIE_PASSWORD` — see `.env.example`) and `https://<domain>/dashboard/callback` registered under **Redirects** in the WorkOS dashboard; until those are set, `/dashboard` answers 503 with the same instructions.
+- **Capability mode:** open `https://<domain>/<token>/dashboard` — the same secret-path credential as `/mcp`, showing the shared single-tenant namespace.
+
+A local stdio setup has no HTTP surface; use `uv run python scripts/inspect_db.py` for the same view in the terminal, or start the server with `MCP_TRANSPORT=streamable-http` and open `http://localhost:8000/dashboard`.
+
+Today the page only reads. Edit and delete actions from the browser are tracked as PER-56 and PER-41.
+
 ## Steer your AI client
 
 Connecting the MCP server is not enough on its own. Every client we've tried also has its own native memory, and left to its own devices it will keep relying on that instead of calling out to this store. The tool descriptions on `search_memory`/`add_memory` nudge the model in that direction, but the reliable fix is to also add a couple of lines to that client's own **custom/general instructions** (the persistent system-prompt-style settings field every major client exposes), telling it to:
@@ -193,7 +204,8 @@ src/context_layer/
   tools/                # the MCP tools: search_memory / add_memory
   identity/             # resolve_user_id — the tenant seam
   memory/               # ContextStore over mem0: add/search/all/delete/delete_all
-  observability/        # access/audit log — one JSON line per tool call
+  dashboard/            # read-only memory browser at /dashboard (AuthKit sign-in on OAuth deploys)
+  observability/        # access/audit log — one JSON line per tool call or page view
   ingest/               # offline backfill: export parsers → normalized format → batch runner
 scripts/
   smoke_test.py         # add + search end-to-end without MCP
@@ -226,6 +238,6 @@ uv pip install -e ~/repos/mem0   # re-run `uv sync` to go back to the pinned rel
 
 ## Roadmap
 
-Working today: the memory store with its tenant-isolation guard, the two MCP tools, both auth modes, the access log, and backfill from a Claude export.
+Working today: the memory store with its tenant-isolation guard, the two MCP tools, both auth modes, the access log, the read-only memory browser at `/dashboard`, and backfill from a Claude export.
 
 Next: retire the capability URL now that OAuth carries real traffic (PER-22) and onboard the first friend tenants (PER-23); tenant hygiene — a per-user export endpoint (PER-24), deletion exposed over MCP (PER-57), an erasure receipt (PER-25); a ChatGPT export parser (PER-28) and an idempotent ingest manifest so re-running an import is safe (PER-29); reconciliation, so a changed preference supersedes its old version instead of overwriting it (PER-32, PER-33); then the consent layer — scoped grants, revocation, deletion propagation (PER-16). Details and status live in the Linear project.

@@ -1,14 +1,19 @@
 """HTTP (streamable-http) transport assembly.
 
-Wraps FastMCP's streamable-http ASGI app in the right guard for the active
-auth mode, and adds a health-check endpoint in front:
+Wraps FastMCP's streamable-http ASGI app in the memory-browser dashboard and
+the right guard for the active auth mode, plus a health-check endpoint in
+front:
 
 - OAuth mode (config.workos_enabled()): FastMCP already added the auth routes +
   bearer middleware, so only RateLimitGuard applies — capability-path rewriting
   would 404 the /.well-known/* discovery routes and swallow the 401 connectors
-  need to launch WorkOS sign-in.
+  need to launch WorkOS sign-in. The dashboard runs its own AuthKit browser
+  sign-in (FastMCP's bearer middleware only covers /mcp).
 - Capability-path mode (default): CapabilityPathGuard serves /<token>/mcp and
-  404s everything else, never emitting a 401.
+  /<token>/dashboard and 404s everything else, never emitting a 401.
+
+The dashboard sits INSIDE the guard, so in capability mode a request only ever
+reaches it through a valid token path.
 
 GET /health (and /healthz) is answered 200 *before* the guards, so a liveness/
 readiness probe works without a capability token or a bearer token.
@@ -43,7 +48,15 @@ class HealthCheck:
 
 def build_asgi_app(mcp):
     """Build the guarded ASGI app for the streamable-http transport."""
-    inner = mcp.streamable_http_app()
+    # Imported here, not at module top: importing the tools module constructs
+    # the process-wide ContextStore (embedder and all), which nothing should
+    # pay for just by importing the transport layer.
+    from context_layer.dashboard import DashboardApp
+    from context_layer.tools.memory_tools import get_store
+
+    inner = DashboardApp(
+        mcp.streamable_http_app(), get_store(), oauth_mode=workos_enabled()
+    )
     if workos_enabled():
         guarded = RateLimitGuard(inner, RATE_LIMIT_RPM)
     else:
