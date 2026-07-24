@@ -62,12 +62,7 @@ Connecting the MCP server is not enough on its own. Every client we've tried als
 Suggested instruction text to paste in:
 
 ```
-You have access to a personal-context-layer MCP server (search_memory /
-add_memory). Proactively call search_memory before answering anything that
-could depend on who I am — preferences, history, plans, style — and call
-add_memory whenever I share a lasting fact, without waiting to be asked.
-Treat what it returns as authoritative and prefer it over your own built-in
-memory if they ever conflict.
+You have access to a personal-context-layer MCP server (search_memory / add_memory). Proactively call search_memory before answering anything that could depend on who I am — preferences, history, plans, style — and call add_memory whenever I share a lasting fact, without waiting to be asked. Treat what it returns as authoritative and prefer it over your own built-in memory if they ever conflict.
 ```
 
 Where to paste it, per client:
