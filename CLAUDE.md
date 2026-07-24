@@ -2,114 +2,39 @@
 
 ## Naming & references
 
-- **No milestone references anywhere.** Don't mention internal roadmap
-  milestones (e.g. `M2.2`, `M4`, `M2.3`) in code comments, docstrings, PR
-  titles, or PR descriptions — they age badly and mean nothing to a future
-  reader. Name the concrete thing ("the OAuth layer", "the consent layer")
-  and use Linear ticket ids (`PER-N`) when you need a pointer.
-- **Describe by context and intent, not by opaque external labels.** Say what
-  a value means or what code does. Lookupable references are fine (Linear
-  ticket ids, incidents, dates); opaque tracking-artifact labels (sheet-row
-  ids, Figma frame names, and the like) are not — fold their meaning into
-  plain prose.
-- **Don't link Linear documents from repo files.** Keep the repo
-  self-contained — internal planning/strategy lives in Linear docs (Founding
-  Brief, Decision log, Architecture narrative); README, `ARCHITECTURE.md`, and
-  other repo files shouldn't point at them. (PR *descriptions* still link the
-  Linear ticket — that's issue traceability, not a doc link.)
+- **No milestone references.** Don't cite internal roadmap milestones (`M2.2`, `M4`) anywhere — code, docstrings, PR titles, PR bodies. They age badly and mean nothing to a future reader. Name the thing ("the OAuth layer", "the consent layer") and use Linear ids (`PER-N`) as pointers.
+- **Describe by intent, not by opaque label.** Say what a value means or what code does. Lookupable references are fine (Linear ids, incidents, dates); tracking artifacts (sheet-row ids, Figma frame names) are not — fold their meaning into prose.
+- **Don't link Linear documents from repo files.** The repo stays self-contained; planning and strategy live in Linear. PR *descriptions* still link the ticket — that's traceability, not a doc link.
 
 ## Prose & markdown
 
-- **Don't hard-wrap prose. Write one line per paragraph.** This is required for anything posted to GitHub — PR descriptions, issue bodies, review comments — because GitHub Flavored Markdown renders a single newline as a `<br>` there, so wrapped text shows as narrow ragged lines that never use the page width. Repo `.md` files render the same either way (standard Markdown treats a single newline as a space), but new prose there is unwrapped too, for one consistent habit.
-- **Leave already-wrapped prose alone.** Much of this file, `README.md`, and `docs/` predates the rule. Don't reflow a file just to convert it — that rewrites `git blame` for every prose line and buries the real change. Files convert as their paragraphs are edited for other reasons.
-- Tables, fenced code blocks, and list items keep their own line structure; this is about paragraph text only.
+- **Don't hard-wrap. One line per paragraph.** Required for anything posted to GitHub — PR bodies, issues, review comments — where GitHub Flavored Markdown turns a single newline into a `<br>`, so wrapped text renders as narrow ragged lines. Repo `.md` renders the same either way, but stays unwrapped for one consistent habit. Tables, fenced code, and list items keep their own line structure.
+- **Don't reflow existing files to convert them.** That rewrites `git blame` for every prose line and buries the real change. Files convert as their paragraphs are edited anyway.
 
 ## Pull requests
 
-When opening a PR, follow `.github/pull_request_template.md`. Specifically:
+Follow `.github/pull_request_template.md` — it's the source of truth for the required sections. CI enforces the title format (`.github/workflows/pr-title.yml`) and the body (`.github/scripts/check_pr_body.py`).
 
-- **Title** must be `<ticket>: <short description>`, where `<ticket>` is the
-  Linear issue id (e.g. `PER-7: add tests and tool error handling`). GitHub
-  can't enforce this from the template, so it's on the author to match it.
-  A small correction that doesn't warrant its own Linear issue may instead use
-  `fix: <short description>` and omit the **Ticket** section below; every other
-  section still applies. Reach for a ticket by default — `fix:` is the
-  exception, not a way to skip writing one.
-- **Description** must contain these sections, matching the template:
-  - **Ticket** — a link to the Linear issue (e.g.
-    `https://linear.app/personal-context-mcp/issue/PER-7`). Omitted only on a
-    `fix:` PR.
-  - **Description** — what the PR is.
-  - **What changed** — the concrete changes.
-  - **Why** — motivation / ticket context / trade-offs.
-  - **Testing** — a checklist of what was verified (ruff / pyright / pytest /
-    manual); tick at least one box (use the N/A box for docs/config-only).
-  - **Deploy impact** — env/schema/dependency/flag changes, or "None". No
-    deploy happens without an explicit go-ahead.
-- Match the template's structure rather than writing an ad-hoc body.
-- **No milestone references** in the title or description (see Naming &
-  references above).
-- **Keep descriptions succinct.** Say just enough to review the diff. Put
-  deeper background, rationale, and history in the Linear ticket, not the PR
-  body — link the ticket rather than restating it.
-- **Keep the description in sync with the diff.** Whenever you push to the
-  branch (amend, follow-up commit, force-push), update the PR description so it
-  matches the current diff — never leave it describing a prior approach.
-- **Before/after table for changed values.** When a PR changes existing copy,
-  config values, thresholds, enum mappings, or renamed identifiers, add a small
-  table (context | before | after, plus a notes column when a caveat matters)
-  describing each row by what it *is / does* — reviewable at a glance without
-  reading the diff line by line.
-- **Pre-PR review pass.** Before pushing a branch for review, re-read the whole
-  diff: confirm it's clean (no leftover debug, dead code, or stray changes) and
-  consider whether it can be simplified (dedupe, drop needless abstraction,
-  tighten control flow). Report findings — don't push straight from "tests
-  green".
-
-CI enforces the title format (`.github/workflows/pr-title.yml`) and the
-required sections (`.github/workflows/pr-body.yml` via
-`.github/scripts/check_pr_body.py`).
+- **Title:** `<ticket>: <short description>`, e.g. `PER-7: add tests and tool error handling`. A correction too small to warrant its own Linear issue may use `fix: <short description>` and omit the **Ticket** section. Reach for a ticket by default — `fix:` is the exception, not a way to avoid writing one.
+- **Testing** needs at least one box ticked; use the N/A box for docs- or config-only changes.
+- **Deploy impact** lists env/schema/dependency/flag changes, or "None". No deploy happens without an explicit go-ahead.
+- **Keep it succinct.** Say enough to review the diff. Background, rationale, and history belong in the Linear ticket — link it rather than restating it.
+- **Update the description as part of any push that changes the diff** — amend, force-push, follow-up commit. Not as a later step. A body describing a prior approach misleads human reviewers and reads to automated ones as a discrepancy between what the PR claims and what it does.
+- **Before/after table when values change.** For changed copy, config, thresholds, enum mappings, or renamed identifiers: a small table (context | before | after, plus notes when a caveat matters), each row named by what it *is or does*, so the change reads at a glance.
+- **Pre-PR review pass.** Before pushing for review, re-read the whole diff: confirm it's clean (no debug leftovers, dead code, stray changes) and consider whether it simplifies (dedupe, drop needless abstraction, tighten control flow). Report what you find — don't push straight from "tests green".
 
 ## Commits
 
-- **Squash while the PR has no human review yet.** Combine extra commits from
-  the same scope via `git commit --amend` or a rebase — aim for one commit per
-  PR (one commit ↔ one Linear ticket / logical change) in the pre-review
-  window. Merges are squash anyway, but keep the pre-review history clean.
-- **Stop rewriting history once a human reviews or comments.** From the first
-  human review/comment onward, add follow-up commits instead of force-pushing,
-  so comments keep their diff anchors. CI/bot activity doesn't count — check the
-  PR's reviews/comments before amending or force-pushing an already-open PR.
-- **Rebase onto latest `main` before pushing — but only pre-review.** Rebase so
-  the diff reflects current `main` (avoids stale-base surprises). Once a human
-  has reviewed, don't rebase/force-push (it breaks their comment anchors) —
-  merge `main` in or add follow-up commits instead.
+- **One commit per PR while it has no human review.** Fold extra commits in with `--amend` or a rebase, and rebase onto latest `main` so the diff reflects current `main`. Merges squash anyway; this keeps the pre-review history clean.
+- **Stop rewriting history once a human reviews or comments.** Force-pushing breaks their comment anchors — add follow-up commits or merge `main` in instead. CI and bot activity don't count; check the PR's actual reviews — and its `state` — before amending.
 
 ## Tests
 
-- **Don't refactor tests you didn't need to touch.** Add new coverage as a new
-  test function (or a row / mock line / tweaked assertion) alongside the
-  existing test — don't reshape it into subtests, table-driven form, or a
-  shared helper unless asked. Minimize the test-file diff.
+- **Don't refactor tests you didn't need to touch.** Add coverage as a new test function, row, or assertion alongside the existing one — don't reshape it into subtests, table-driven form, or a shared helper unless asked. Minimize the test-file diff.
 
 ## Branches & worktrees
 
-- **Check a PR's merge state before pushing to its branch.** A merged PR is
-  finished: pushing follow-up commits to its branch strands them (they land
-  after the merge and never reach `main`), and editing a merged PR's body is
-  misleading. Before pushing follow-up work or updating a PR, confirm it's
-  still open; if it has merged, branch fresh from the latest `main` and open a
-  new PR for the follow-up.
-- **Branch naming:** `<user>/<ticket>-<slug>` (e.g.
-  `wanyuenmei/per-49-modular-layout`).
-- **Every PR starts in its own worktree — no exceptions.** Create a dedicated
-  `git worktree` (e.g. under `.worktrees/<slug>`) with its own branch for every
-  piece of work that becomes a PR — the foreground/main task included, not just
-  background ones. Never commit PR work directly in the main checkout, and
-  **never use a long-lived per-session branch.** This holds in Claude Code web
-  sessions too: each task (foreground or backgrounded) gets its own worktree,
-  so several can run in parallel without colliding on the working tree or
-  branch.
-- **Clean up on merge.** "Automatically delete head branches" is enabled, so
-  merged PR branches prune themselves; also remove the matching local
-  branch/worktree once its PR merges — don't leave stale worktrees around.
+- **Every PR starts in its own worktree — no exceptions.** A dedicated `git worktree` under `.worktrees/<slug>` on its own branch, for every piece of work that becomes a PR, foreground included. Never commit PR work in the main checkout, and never use a long-lived per-session branch. This holds in Claude Code web sessions too, so parallel tasks don't collide.
+- **Branch naming:** `<user>/<ticket>-<slug>`, e.g. `wanyuenmei/per-49-modular-layout`.
+- **Re-check `state` immediately before every push, amend, or force-push.** Not reviews — `state`. `gh pr view <n> --json state,mergedAt`. A PR can merge while you're mid-task, and a merged PR is finished: anything pushed to its branch afterwards lands after the merge and never reaches `main`, silently. Checking once at the start of the work is not enough. If it has merged, branch fresh from latest `main` and open a new PR.
+- **Clean up on merge.** Head branches auto-delete; remove the matching local branch and worktree too.
