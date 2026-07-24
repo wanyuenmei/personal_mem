@@ -8,6 +8,7 @@ none of these tests touch a real backend or the network.
 import dataclasses
 import json
 import logging
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -215,6 +216,10 @@ def test_expired_session_is_refreshed_and_cookie_reset(store, oauth_config):
 class _FakeUser:
     id: str
     email: str
+    # The real workos User model parses timestamps into datetimes, which the
+    # SDK's json.dumps-based sealing cannot serialize — a fake with only
+    # strings would hide that (and did, in prod).
+    created_at: datetime = datetime(2026, 7, 24, 12, 0, 0)
 
 
 @dataclasses.dataclass
@@ -248,6 +253,7 @@ def test_callback_success_seals_session_cookie_and_redirects(store, oauth_config
     unsealed = unseal_data(sealed, config.WORKOS_COOKIE_PASSWORD)
     assert unsealed["access_token"] == "at"
     assert unsealed["user"]["id"] == "user_123"
+    assert unsealed["user"]["created_at"] == "2026-07-24 12:00:00"
     state_cookie = [h for h in resp.headers.get_list("set-cookie") if "wos_oauth_state" in h]
     assert state_cookie
     assert '=""' in state_cookie[0] or "Max-Age=0" in state_cookie[0]

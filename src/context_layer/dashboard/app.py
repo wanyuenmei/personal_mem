@@ -26,6 +26,7 @@ or buffers the MCP app's responses the way a BaseHTTPMiddleware would.
 
 import dataclasses
 import hmac
+import json
 import logging
 import secrets
 from typing import Any, Optional
@@ -51,6 +52,18 @@ SESSION_COOKIE = "wos_session"
 STATE_COOKIE = "wos_oauth_state"
 # Long-lived cookie; the sealed refresh token inside is what actually expires.
 _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+
+
+def _json_safe(data: dict) -> dict:
+    """Make a model dict survive the SDK's json.dumps-based session sealing.
+
+    The workos User model parses its timestamps into datetime objects, which
+    seal_session_from_auth_response feeds straight into json.dumps — a crash.
+    default=str stringifies them, matching what the SDK's own refresh path
+    stores (it re-seals the raw API JSON, where timestamps are strings).
+    """
+    return json.loads(json.dumps(data, default=str))
+
 
 _LOGIN_UNCONFIGURED = (
     "Dashboard sign-in is not configured on this deploy. Set WORKOS_API_KEY and "
@@ -234,9 +247,11 @@ class DashboardApp:
             sealed = seal_session_from_auth_response(
                 access_token=auth.access_token,
                 refresh_token=auth.refresh_token,
-                user=dataclasses.asdict(auth.user),
+                user=_json_safe(dataclasses.asdict(auth.user)),
                 impersonator=(
-                    dataclasses.asdict(auth.impersonator) if auth.impersonator else None
+                    _json_safe(dataclasses.asdict(auth.impersonator))
+                    if auth.impersonator
+                    else None
                 ),
                 cookie_password=config.WORKOS_COOKIE_PASSWORD,
             )
