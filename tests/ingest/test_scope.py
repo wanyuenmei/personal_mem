@@ -1,4 +1,8 @@
-"""Tests for scope inference (ingest/scope.py).
+"""Tests for conversation scope inference (ingest/scope.py).
+
+The classifier itself lives in memory/scope.py (covered directly in
+tests/memory/test_scope_classifier.py); these check that ingest flattens a conversation
+and delegates to it correctly.
 
 The anthropic client is faked by injecting a stand-in `anthropic` module into
 sys.modules, so these need neither the real package nor a network call.
@@ -7,7 +11,7 @@ sys.modules, so these need neither the real package nor a network call.
 import sys
 import types
 
-import context_layer.ingest.scope as scope_mod
+import context_layer.memory.scope as scope_mod
 from context_layer.ingest.normalized import Conversation, Message
 from context_layer.ingest.scope import SCOPES, infer_scope
 

@@ -17,6 +17,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from context_layer.identity import resolve_user_id
 from context_layer.memory import ContextStore
+from context_layer.memory.scope import classify
 from context_layer.observability import log_tool_call
 
 logger = logging.getLogger("context_layer.tools")
@@ -56,16 +57,18 @@ def search_memory(query: str, limit: int = 5, ctx: Context | None = None) -> str
     return "\n".join(lines)
 
 
-def add_memory(text: str, scope: str = "general", ctx: Context | None = None) -> str:
+def add_memory(text: str, ctx: Context | None = None) -> str:
     """Save a durable fact about the user to their authoritative context store.
 
     Call this whenever the user shares a lasting preference, decision,
     correction, or personal detail worth remembering across conversations and
-    across other AI apps — don't wait to be asked to "remember". `scope` is a
-    coarse category (e.g. general, shopping, dietary, travel, writing_style, work).
+    across other AI apps — don't wait to be asked to "remember".
     """
-    log_tool_call("add_memory", ctx, scope=scope)
+    log_tool_call("add_memory", ctx)
     user_id = resolve_user_id(ctx)
+    # Classified here, not taken from the caller: scope is an exact-match filter
+    # on read and will gate third-party access, so the client must not choose it.
+    scope = classify(text)
     try:
         result = _store.add(text, user_id=user_id, scope=scope)
     except Exception:

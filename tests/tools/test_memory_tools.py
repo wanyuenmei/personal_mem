@@ -84,25 +84,36 @@ def test_add_memory_happy_path_still_works(server_module, monkeypatch):
     monkeypatch.setattr(
         server_module._store, "add", MagicMock(return_value={"results": [{"id": "1"}]})
     )
+    monkeypatch.setattr(server_module, "classify", lambda text: "dietary")
 
-    result = server_module.add_memory("I like tea", scope="dietary")
+    result = server_module.add_memory("I like tea")
 
     assert "scope=dietary" in result
 
 
-def test_add_memory_logs_scope_and_timestamp(server_module, monkeypatch, caplog):
+def test_add_memory_scope_comes_from_the_classifier(server_module, monkeypatch):
+    """The caller can't set scope — the server classifies what it is saving."""
+    add = MagicMock(return_value={"results": [{"id": "1"}]})
+    monkeypatch.setattr(server_module._store, "add", add)
+    monkeypatch.setattr(server_module, "classify", lambda text: "health")
+
+    server_module.add_memory("I started running again")
+
+    assert add.call_args.kwargs["scope"] == "health"
+
+
+def test_add_memory_logs_the_tool_call(server_module, monkeypatch, caplog):
     monkeypatch.setattr(
         server_module._store, "add", MagicMock(return_value={"results": []})
     )
 
     with caplog.at_level("INFO", logger="context_layer.access"):
-        server_module.add_memory("I like tea", scope="dietary")
+        server_module.add_memory("I like tea")
 
     [record] = [r for r in caplog.records if "tool_call" in r.getMessage()]
     message = record.getMessage()
     assert "tool=add_memory" in message
     assert "client=stdio" in message
-    assert "scope=dietary" in message
     assert "ts=" in message
 
 

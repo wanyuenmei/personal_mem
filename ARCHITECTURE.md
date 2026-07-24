@@ -34,7 +34,7 @@ flowchart LR
 | Auth | `auth/` | capability-path + rate-limit guards, WorkOS OAuth verifier | an auth/gateway service |
 | Tools | `tools/` | the MCP tools (`search_memory`, `add_memory`) | the MCP-facing service |
 | Identity | `identity/` | `resolve_user_id` — the single tenant-isolation seam | shared client of an auth service |
-| Memory | `memory/` | `ContextStore` over mem0 (+ tenant guard) | the **memory service** |
+| Memory | `memory/` | `ContextStore` over mem0 (+ tenant guard); the scope vocabulary + classifier both write paths share | the **memory service** |
 | Ingest | `ingest/` | offline backfill: export parsers → normalized format → per-conversation scope inference → mem0 extraction | a batch import worker |
 | Observability | `observability/` | structured access/audit logging | ships to a log/metrics sink |
 | Config | `config.py` | env-driven settings + mem0 config builder | 12-factor env per service |
