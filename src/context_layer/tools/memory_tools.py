@@ -64,7 +64,7 @@ def add_memory(text: str, scope: str = "general", ctx: Context | None = None) ->
     across other AI apps — don't wait to be asked to "remember". `scope` is a
     coarse category (e.g. general, shopping, dietary, travel, writing_style, work).
     """
-    log_tool_call("add_memory", ctx, scope=scope)
+    log_tool_call("add_memory", ctx)
     user_id = resolve_user_id(ctx)
     try:
         result = _store.add(text, user_id=user_id, scope=scope)
