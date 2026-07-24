@@ -163,6 +163,12 @@ WORKOS_USER_ID_PREFIX = os.getenv("WORKOS_USER_ID_PREFIX", "workos_")
 # so minor drift between WorkOS and this server doesn't reject otherwise-valid
 # tokens near their expiry boundary; set 0 to disable.
 WORKOS_LEEWAY = int(os.getenv("WORKOS_LEEWAY", "60"))
+# Key that seals the dashboard's browser-session cookie (the MCP bearer flow
+# never uses cookies). Must be a Fernet key — generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Unset => the dashboard cannot sign users in on an OAuth deploy (it answers
+# 503 with instructions instead); capability-path deploys don't need it.
+WORKOS_COOKIE_PASSWORD = os.getenv("WORKOS_COOKIE_PASSWORD", "").strip()
 
 
 def workos_required_scopes() -> list[str]:
@@ -181,6 +187,16 @@ def workos_enabled() -> bool:
     and the server falls back to the capability-path stopgap.
     """
     return bool(WORKOS_CLIENT_ID and WORKOS_AUTHKIT_DOMAIN and PUBLIC_SERVER_URL)
+
+
+def dashboard_login_enabled() -> bool:
+    """True when the dashboard can run its AuthKit browser sign-in.
+
+    Needs OAuth mode plus two things the MCP bearer flow doesn't: the API key
+    (the code exchange and session refresh are authenticated WorkOS calls) and
+    the cookie key that seals the browser session.
+    """
+    return bool(workos_enabled() and WORKOS_API_KEY and WORKOS_COOKIE_PASSWORD)
 
 
 def infer_enabled() -> bool:

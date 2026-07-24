@@ -119,6 +119,31 @@ def _oauth_client_id() -> str:
     return _bounded(client_id, "none") if client_id else "none"
 
 
+def log_dashboard_view(user_id: str, client: str) -> None:
+    """Log one dashboard page view — a browser reading every memory is exactly
+    the kind of access this log exists to record.
+
+    Same keys as ``log_tool_call`` (with ``tool: "dashboard"``) so one query
+    shape covers both surfaces. ``client`` follows ``_client_label``'s trust
+    order: the capability guard's stamped token label when there is one
+    (server-assigned), else the browser's User-Agent (self-asserted). There is
+    no OAuth client claim on a browser session, so client_id stays "none".
+    """
+    logger.info(
+        json.dumps(
+            {
+                "level": "info",
+                "message": "dashboard_view",
+                "tool": "dashboard",
+                "user": user_id,
+                "client": _bounded(client, "unlabeled"),
+                "client_id": "none",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+
+
 def log_tool_call(tool: str, ctx: Context | None) -> None:
     """Log one access/audit record: tool, user, client, timestamp.
 

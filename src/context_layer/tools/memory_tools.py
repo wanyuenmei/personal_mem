@@ -26,6 +26,12 @@ logger = logging.getLogger("context_layer.tools")
 _store = ContextStore()
 
 
+def get_store() -> ContextStore:
+    """The process-wide store, shared with the dashboard so one mem0 instance
+    (embedder, DB pool) serves both surfaces instead of two."""
+    return _store
+
+
 def search_memory(query: str, limit: int = 5, ctx: Context | None = None) -> str:
     """Retrieve the user's AUTHORITATIVE personal context for a query.
 
