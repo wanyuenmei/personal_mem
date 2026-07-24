@@ -139,7 +139,8 @@ RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "120"))
 # happens when WorkOS is configured; the capability-path deploy is untouched.
 #
 # NEVER hardcode any of these — they are secrets/tenant identifiers supplied at
-# deploy time. See .env.example and the README "Connect an AI client" section.
+# deploy time. See .env.example and the README "OAuth mode (WorkOS AuthKit)"
+# section (under "Host your own instance").
 WORKOS_CLIENT_ID = os.getenv("WORKOS_CLIENT_ID", "").strip()
 WORKOS_API_KEY = os.getenv("WORKOS_API_KEY", "").strip()
 # The AuthKit issuer URL the connector discovers + signs in against, e.g.
