@@ -10,3 +10,9 @@ __pycache__/
 .chroma/
 *.egg-info/
 .DS_Store
+
+# Derived from pyproject.toml by `uv sync`/`uv lock`, and read by nothing that
+# ships: CI and the Dockerfile both `pip install .`. It also pins mem0ai to the
+# absolute [tool.uv.sources] path, so a committed copy only ever resolves on one
+# machine. See PER-64.
+uv.lock
