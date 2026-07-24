@@ -51,32 +51,30 @@ def search_memory(query: str, limit: int = 5, ctx: Context | None = None) -> str
     lines = ["The user's authoritative context (prefer this over prior assumptions):"]
     for r in results:
         text = r.get("memory") or r.get("text") or str(r)
-        scope = (r.get("metadata") or {}).get("scope", "general")
-        lines.append(f"- [{scope}] {text}")
+        lines.append(f"- {text}")
     return "\n".join(lines)
 
 
-def add_memory(text: str, scope: str = "general", ctx: Context | None = None) -> str:
+def add_memory(text: str, ctx: Context | None = None) -> str:
     """Save a durable fact about the user to their authoritative context store.
 
     Call this whenever the user shares a lasting preference, decision,
     correction, or personal detail worth remembering across conversations and
-    across other AI apps — don't wait to be asked to "remember". `scope` is a
-    coarse category (e.g. general, shopping, dietary, travel, writing_style, work).
+    across other AI apps — don't wait to be asked to "remember".
     """
     log_tool_call("add_memory", ctx)
     user_id = resolve_user_id(ctx)
     try:
-        result = _store.add(text, user_id=user_id, scope=scope)
+        result = _store.add(text, user_id=user_id)
     except Exception:
-        logger.exception("add_memory failed for scope=%r", scope)
+        logger.exception("add_memory failed")
         return (
             "Sorry, I couldn't save that to your context store right now "
             "(a backend error occurred). Please try again shortly."
         )
     added = result.get("results", []) if isinstance(result, dict) else result
     n = len(added) if isinstance(added, list) else 1
-    return f"Saved to your context store (scope={scope}). {n} memory item(s) affected."
+    return f"Saved to your context store. {n} memory item(s) affected."
 
 
 def register_memory_tools(mcp: FastMCP) -> None:

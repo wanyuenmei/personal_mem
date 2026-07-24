@@ -1,7 +1,6 @@
 """Tests for the batch backfill runner (ingest/runner.py).
 
-Pure logic against a fake store and an injected scope function — no mem0, no
-LLM, no network.
+Pure logic against a fake store — no mem0, no LLM, no network.
 """
 
 import pytest
@@ -19,12 +18,11 @@ class FakeStore:
         self.calls = []
         self._fail_on = fail_on
 
-    def add(self, content, user_id, scope, extra_metadata=None, infer=None):
+    def add(self, content, user_id, extra_metadata=None, infer=None):
         self.calls.append(
             {
                 "content": content,
                 "user_id": user_id,
-                "scope": scope,
                 "extra_metadata": extra_metadata,
                 "infer": infer,
             }
@@ -50,10 +48,10 @@ def _fixture():
     ]
 
 
-def test_run_backfill_adds_per_conversation_with_scope_and_provenance():
+def test_run_backfill_adds_per_conversation_with_provenance():
     store = FakeStore()
 
-    result = run_backfill(_fixture(), store, "mei", scope_fn=lambda c: "shopping")
+    result = run_backfill(_fixture(), store, "mei")
 
     assert result.conversations == 2
     assert result.facts_added == 4  # 2 conversations × 2 facts each
@@ -63,24 +61,7 @@ def test_run_backfill_adds_per_conversation_with_scope_and_provenance():
         {"role": "user", "content": "I like dark roast"},
         {"role": "assistant", "content": "noted"},
     ]
-    assert store.calls[0]["scope"] == "shopping"
     assert store.calls[0]["extra_metadata"] == {"source": "claude", "source_id": "c1"}
-
-
-def test_scope_override_wins_and_skips_scope_fn():
-    store = FakeStore()
-    consulted = []
-
-    run_backfill(
-        _fixture(),
-        store,
-        "mei",
-        scope="work",
-        scope_fn=lambda c: consulted.append(c.source_id) or "other",
-    )
-
-    assert [c["scope"] for c in store.calls] == ["work", "work"]
-    assert consulted == []  # scope_fn never called when scope is forced
 
 
 def test_infer_override_is_forwarded_to_store():
@@ -88,7 +69,7 @@ def test_infer_override_is_forwarded_to_store():
     store.add as `infer`."""
     store = FakeStore()
 
-    run_backfill(_fixture(), store, "mei", scope="general", infer=False)
+    run_backfill(_fixture(), store, "mei", infer=False)
 
     assert [c["infer"] for c in store.calls] == [False, False]
 
@@ -96,7 +77,7 @@ def test_infer_override_is_forwarded_to_store():
 def test_infer_defaults_to_none_following_config():
     store = FakeStore()
 
-    run_backfill(_fixture(), store, "mei", scope="general")
+    run_backfill(_fixture(), store, "mei")
 
     assert [c["infer"] for c in store.calls] == [None, None]
 
@@ -104,7 +85,7 @@ def test_infer_defaults_to_none_following_config():
 def test_limit_caps_conversations():
     store = FakeStore()
 
-    result = run_backfill(_fixture(), store, "mei", scope="general", limit=1)
+    result = run_backfill(_fixture(), store, "mei", limit=1)
 
     assert result.conversations == 1
     assert len(store.calls) == 1
@@ -114,7 +95,7 @@ def test_empty_conversation_is_skipped():
     convs = [_conv("c1", "empty", []), _conv("c2", "ok", [("user", "hi")])]
     store = FakeStore()
 
-    result = run_backfill(convs, store, "mei", scope="general")
+    result = run_backfill(convs, store, "mei")
 
     assert result.skipped == 1
     assert len(store.calls) == 1
@@ -123,7 +104,7 @@ def test_empty_conversation_is_skipped():
 def test_failure_is_counted_and_does_not_abort():
     store = FakeStore(fail_on="c1")
 
-    result = run_backfill(_fixture(), store, "mei", scope="general")
+    result = run_backfill(_fixture(), store, "mei")
 
     assert result.failures == 1
     assert result.facts_added == 2  # c2 still imported after c1 failed
@@ -140,7 +121,7 @@ def test_tenant_isolation_error_propagates_not_swallowed():
             raise TenantIsolationError("blank user_id")
 
     with pytest.raises(TenantIsolationError):
-        run_backfill(_fixture(), _RaisingStore(), "", scope="general")
+        run_backfill(_fixture(), _RaisingStore(), "")
 
 
 def test_progress_callback_receives_per_conversation_rows():
@@ -151,30 +132,23 @@ def test_progress_callback_receives_per_conversation_rows():
         _fixture(),
         store,
         "mei",
-        scope="general",
-        on_progress=lambda i, total, conv, scope, n: rows.append((i, total, conv.source_id, n)),
+        on_progress=lambda i, total, conv, n: rows.append((i, total, conv.source_id, n)),
     )
 
     assert rows == [(1, 2, "c1", 2), (2, 2, "c2", 2)]
 
 
 def test_estimate_counts_messages_and_calls():
-    est = estimate(_fixture(), with_scope_inference=True)
+    est = estimate(_fixture())
 
     assert est.conversations == 2
     assert est.messages == 3
-    assert est.llm_calls == 4  # 2 conversations × (extraction + scope inference)
+    assert est.llm_calls == 2  # one extraction call per conversation
     assert est.approx_input_tokens >= 0
 
 
-def test_estimate_without_scope_inference_halves_calls():
-    est = estimate(_fixture(), with_scope_inference=False)
-
-    assert est.llm_calls == 2  # extraction only
-
-
 def test_estimate_zero_cost_extractor_has_no_calls_or_cost():
-    est = estimate(_fixture(), with_extraction=False, with_scope_inference=False)
+    est = estimate(_fixture(), with_extraction=False)
 
     assert est.llm_calls == 0
     assert est.approx_cost_usd == 0.0
@@ -183,8 +157,8 @@ def test_estimate_zero_cost_extractor_has_no_calls_or_cost():
 def test_estimate_respects_limit_and_ignores_empty_for_calls():
     convs = [_conv("c1", "empty", []), _conv("c2", "ok", [("user", "hi there")])]
 
-    est = estimate(convs, with_scope_inference=True)
+    est = estimate(convs)
 
     assert est.conversations == 2
     assert est.messages == 1
-    assert est.llm_calls == 2  # only the non-empty conversation costs calls
+    assert est.llm_calls == 1  # only the non-empty conversation costs a call

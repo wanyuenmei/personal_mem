@@ -27,7 +27,7 @@ src/context_layer/
   auth/                 # capability-path + rate-limit guards; WorkOS OAuth (opt-in)
   tools/                # the MCP tools: search_memory / add_memory
   identity/             # resolve_user_id — the tenant seam
-  memory/               # ContextStore over mem0: add/search/all, scope tagging
+  memory/               # ContextStore over mem0: add/search/all/delete
   observability/        # structured access/audit log
 scripts/
   smoke_test.py         # add + search end-to-end without MCP
@@ -85,15 +85,7 @@ EXTRACTION_MODE=anthropic uv run python scripts/backfill.py \
     ~/Downloads/claude-export.zip --limit 20 --yes
 ```
 
-Each conversation is fed through mem0 extraction and tagged with a scope
-(inferred per conversation, or forced with `--scope`). A full import is the most
-expensive operation here — every conversation costs extraction tokens — so it
-never runs without `--yes`, and `--limit N` caps how many conversations go
-through. `--extractor` picks the fact extractor per run: `auto` (default,
-follows `EXTRACTION_MODE`), `llm` (force LLM extraction), or `none` (store raw
-with no LLM — a 0-cost path that also skips scope inference, for testing the
-pipeline). Imported memories carry `source`/`source_id` provenance in their
-metadata. Then `scripts/inspect_db.py` shows what landed.
+Each conversation is fed through mem0 extraction. A full import is the most expensive operation here — every conversation costs extraction tokens — so it never runs without `--yes`, and `--limit N` caps how many conversations go through. `--extractor` picks the fact extractor per run: `auto` (default, follows `EXTRACTION_MODE`), `llm` (force LLM extraction), or `none` (store raw with no LLM — a 0-cost path, for testing the pipeline). Imported memories carry `source`/`source_id` provenance in their metadata. Then `scripts/inspect_db.py` shows what landed.
 
 ## Connect an AI client
 
@@ -229,8 +221,10 @@ memory store → mem0 → vector store — see
 [`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes
 `GET /health` (200, no auth) for liveness/readiness probes.
 
-- **Scopes:** every memory is tagged (`dietary`, `shopping`, `travel`, …) —
-  the spine of the future per-scope consent layer.
+- **Categories:** memories carry no category tag today. The consent layer will
+  define the vocabulary and classify into it out of band; mem0 keeps the fact
+  text and its embedding, so categories stay derivable whenever a grant needs
+  them.
 - **Trust model:** run it fully local (`none` mode: nothing leaves your
   machine), or self-host the deploy. The hosted instance is a custodian, not
   an owner — export and delete at any time.

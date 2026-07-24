@@ -13,23 +13,18 @@ def main() -> None:
     store = ContextStore()
 
     print("\n-- add --")
-    print(store.add(
-        "I prefer dark roast coffee, no sugar.",
-        user_id=DEFAULT_USER_ID,
-        scope="dietary",
-    ))
+    print(store.add("I prefer dark roast coffee, no sugar.", user_id=DEFAULT_USER_ID))
     print(store.add(
         "I'm shopping for slim-fit selvedge denim in a 32 waist.",
         user_id=DEFAULT_USER_ID,
-        scope="shopping",
     ))
 
     print("\n-- search: 'what coffee do I like?' --")
     for r in store.search("what coffee do I like?", user_id=DEFAULT_USER_ID):
         print("  ", r.get("memory") or r, "| meta:", r.get("metadata"))
 
-    print("\n-- search scoped to 'shopping' --")
-    for r in store.search("jeans", user_id=DEFAULT_USER_ID, scope="shopping"):
+    print("\n-- search: 'jeans' --")
+    for r in store.search("jeans", user_id=DEFAULT_USER_ID):
         print("  ", r.get("memory") or r, "| meta:", r.get("metadata"))
 
     print("\nOK")

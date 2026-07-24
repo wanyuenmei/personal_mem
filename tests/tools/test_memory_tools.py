@@ -71,9 +71,7 @@ def test_search_memory_happy_path_still_works(server_module, monkeypatch):
     monkeypatch.setattr(
         server_module._store,
         "search",
-        MagicMock(
-            return_value=[{"memory": "likes coffee", "metadata": {"scope": "general"}}]
-        ),
+        MagicMock(return_value=[{"memory": "likes coffee"}]),
     )
 
     result = server_module.search_memory("coffee")
@@ -86,9 +84,9 @@ def test_add_memory_happy_path_still_works(server_module, monkeypatch):
         server_module._store, "add", MagicMock(return_value={"results": [{"id": "1"}]})
     )
 
-    result = server_module.add_memory("I like tea", scope="dietary")
+    result = server_module.add_memory("I like tea")
 
-    assert "scope=dietary" in result
+    assert "1 memory item(s) affected" in result
 
 
 def test_add_memory_logs_tool_client_and_timestamp(server_module, monkeypatch, caplog):
@@ -97,7 +95,7 @@ def test_add_memory_logs_tool_client_and_timestamp(server_module, monkeypatch, c
     )
 
     with caplog.at_level("INFO", logger="context_layer.access"):
-        server_module.add_memory("I like tea", scope="dietary")
+        server_module.add_memory("I like tea")
 
     [record] = [r for r in caplog.records if "tool_call" in r.getMessage()]
     logged = json.loads(record.getMessage())
