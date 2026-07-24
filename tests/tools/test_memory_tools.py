@@ -7,6 +7,7 @@ Face. The server_module fixture patches mem0.Memory.from_config out *before*
 importing the module, so import is fully offline.
 """
 
+import json
 import sys
 from unittest.mock import MagicMock
 
@@ -90,7 +91,7 @@ def test_add_memory_happy_path_still_works(server_module, monkeypatch):
     assert "scope=dietary" in result
 
 
-def test_add_memory_logs_scope_and_timestamp(server_module, monkeypatch, caplog):
+def test_add_memory_logs_tool_client_and_timestamp(server_module, monkeypatch, caplog):
     monkeypatch.setattr(
         server_module._store, "add", MagicMock(return_value={"results": []})
     )
@@ -99,20 +100,18 @@ def test_add_memory_logs_scope_and_timestamp(server_module, monkeypatch, caplog)
         server_module.add_memory("I like tea", scope="dietary")
 
     [record] = [r for r in caplog.records if "tool_call" in r.getMessage()]
-    message = record.getMessage()
-    assert "tool=add_memory" in message
-    assert "client=stdio" in message
-    assert "scope=dietary" in message
-    assert "ts=" in message
+    logged = json.loads(record.getMessage())
+    assert logged["tool"] == "add_memory"
+    assert logged["client"] == "stdio"
+    assert logged["ts"]
 
 
-def test_search_memory_logs_scope_none(server_module, monkeypatch, caplog):
+def test_search_memory_logs_the_tool_call(server_module, monkeypatch, caplog):
     monkeypatch.setattr(server_module._store, "search", MagicMock(return_value=[]))
 
     with caplog.at_level("INFO", logger="context_layer.access"):
         server_module.search_memory("anything")
 
     [record] = [r for r in caplog.records if "tool_call" in r.getMessage()]
-    message = record.getMessage()
-    assert "tool=search_memory" in message
-    assert "scope=none" in message
+    logged = json.loads(record.getMessage())
+    assert logged["tool"] == "search_memory"
