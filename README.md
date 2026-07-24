@@ -31,18 +31,24 @@ Dockerfile, railway.json   # deploy artifacts (Railway)
 
 ## Quickstart (local, 5 minutes)
 
-Prereqs: Python 3.12, [uv](https://docs.astral.sh/uv/), a clone of [mem0](https://github.com/mem0ai/mem0) at `~/repos/mem0`.
+Prereqs: Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 cp .env.example .env             # defaults are fine to start
 uv venv --python 3.12
-uv sync --extra local            # deps incl. mem0 from the local clone
+uv sync --extra local            # local-dev stack: chromadb + sentence-transformers
 
 # prove the loop (no API key needed in EXTRACTION_MODE=none)
 EXTRACTION_MODE=none uv run python scripts/smoke_test.py
 
 # see everything stored about you
 uv run python scripts/inspect_db.py
+```
+
+[mem0](https://github.com/mem0ai/mem0) comes from PyPI at the pinned version, the same way CI and the deploy image install it. To develop against a local clone instead — say to test a fix worth sending upstream — swap it in at the environment level rather than in `pyproject.toml`, so nothing machine-specific gets committed:
+
+```bash
+uv pip install -e ~/repos/mem0   # re-run `uv sync` to go back to the pinned release
 ```
 
 ## Extraction modes

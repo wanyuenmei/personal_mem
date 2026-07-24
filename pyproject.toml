@@ -3,10 +3,6 @@ name = "context-layer"
 version = "0.1.0"
 description = "User-owned, portable personal context layer over mem0, exposed via MCP."
 requires-python = ">=3.12,<3.14"
-# mem0 is installed from the local clone (../mem0), see requirements.txt / README.
-# mem0ai: locally uv resolves it from the ~/repos/mem0 editable clone via
-# [tool.uv.sources] below; the Docker build uses pip, which ignores uv sources
-# and installs mem0ai==2.0.12 from PyPI (identical version).
 dependencies = [
     "mem0ai==2.0.12",
     "mcp>=1.2",
@@ -29,10 +25,6 @@ local = [
     "sentence-transformers>=3.0",  # HuggingFace embedder
     "chromadb>=0.5",               # local embedded vector store
 ]
-
-[tool.uv.sources]
-# Local dev only — pip (Docker) ignores this and uses PyPI.
-mem0ai = { path = "/Users/mei/repos/mem0", editable = true }
 
 [build-system]
 requires = ["hatchling"]
