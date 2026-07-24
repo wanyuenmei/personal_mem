@@ -162,7 +162,11 @@ class WorkOSTokenVerifier(TokenVerifier):
         exp = claims.get("exp")
         return AccessToken(
             token=token,
-            client_id=str(claims.get("client_id") or claims.get("azp") or self.issuer or subject),
+            # "unknown" rather than a stand-in: MCP-flow tokens carry neither
+            # claim, and falling back to the issuer or subject produced a
+            # plausible-looking constant that read as real per-app data in the
+            # access log. Recovering the actual client needs introspection (PER-65).
+            client_id=str(claims.get("client_id") or claims.get("azp") or "unknown"),
             scopes=scopes,
             expires_at=int(exp) if exp is not None else None,
             subject=str(subject),
