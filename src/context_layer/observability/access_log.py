@@ -22,8 +22,9 @@ other):
 
   - Capability-path mode stamps a per-token label into the ASGI scope's
     "state", which a Starlette Request exposes as ``request.state.client``.
-  - OAuth mode never runs that guard, so no label exists; the client is
-    identified from the verified access token and the MCP handshake instead.
+  - OAuth mode never runs that guard, so no label exists; the client is named
+    from the request's ``User-Agent`` instead, and ``client_id`` comes from the
+    verified access token when it carries a client claim.
 
 This is deliberately just structured logging rather than a dedicated audit
 datastore — the foundation for the audit dashboard (see PER-13), not that work
@@ -51,11 +52,11 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
-# Every caller-supplied value (clientInfo.name, client_id) is bounded so one
-# caller can't emit unbounded log lines.
-# JSON encoding handles the *injection* half of the problem on its own: a
-# client naming itself `x", "user": "someone_else` gets escaped into a single
-# string value rather than forging a sibling attribute.
+# Every caller-supplied value (User-Agent, client_id) is bounded so one caller
+# can't emit unbounded log lines.
+# JSON encoding handles the *injection* half of the problem on its own: a client
+# sending `x", "user": "someone_else` gets escaped into a single string value
+# rather than forging a sibling attribute.
 _MAX_FIELD = 64
 
 
@@ -67,11 +68,16 @@ def _bounded(value: str, fallback: str) -> str:
 def _client_label(ctx: Context | None) -> str:
     """Best available *human-readable* client name.
 
-    Prefers the capability-path token label (server-assigned, trustworthy).
-    Falls back to the MCP handshake's ``clientInfo.name``, which the client
-    asserts about itself and so can say anything — it is for reading logs, not
-    for authorization. Filter on ``client_id`` when the answer has to be
-    trustworthy.
+    Prefers the capability-path token label, which the server assigns and can
+    therefore trust. Under OAuth that guard never runs, so this falls back to
+    the request's ``User-Agent`` — enough to tell claude.ai from ChatGPT from
+    Cursor when reading logs, but asserted by the caller, so never a basis for
+    authorization.
+
+    The MCP handshake's ``clientInfo.name`` would be the tidier source, and is
+    deliberately not used: the server runs ``stateless_http=True``, so FastMCP
+    builds a fresh session per request with no preceding ``initialize`` and
+    ``client_params`` is never populated by the time a tool runs.
     """
     if ctx is None:
         return "stdio"
@@ -81,36 +87,32 @@ def _client_label(ctx: Context | None) -> str:
     except ValueError:
         return "stdio"
 
-    if request is not None:
-        label = getattr(request.state, "client", None)
-        if label:
-            return _bounded(str(label), "unlabeled")
+    if request is None:
+        return "stdio"
 
-    # OAuth mode: no capability label, so fall back to what the client claims.
+    label = getattr(request.state, "client", None)
+    if label:
+        return _bounded(str(label), "unlabeled")
+
+    user_agent = ""
     try:
-        params = ctx.request_context.session.client_params
-        name = params.clientInfo.name if params and params.clientInfo else ""
-    except (AttributeError, ValueError):
-        name = ""
-    if name:
-        return _bounded(name, "unlabeled")
-
-    return "stdio" if request is None else "unlabeled"
+        user_agent = request.headers.get("user-agent") or ""
+    except AttributeError:
+        pass
+    return _bounded(user_agent, "unlabeled")
 
 
 def _oauth_client_id() -> str:
     """The OAuth client the token was issued to, or "none" outside OAuth mode.
 
-    Unlike the client name this is not self-asserted: the bearer middleware has
-    already verified the token, and WorkOS issued it to a client registered with
-    this environment.
+    Unlike the client name this is not self-asserted — the bearer middleware has
+    already verified the token — but on this deployment it is usually absent.
 
-    Caveat worth knowing before filtering on it: ``WorkOSTokenVerifier`` derives
-    this from the token's ``client_id``/``azp`` claim and falls back to the
-    issuer or the subject when neither is present. If a tenant's tokens carry
-    neither claim, this degrades to a constant (the issuer) or a duplicate of
-    ``user`` rather than identifying the app — check a real token before relying
-    on it for per-app attribution.
+    WorkOS's MCP-flow tokens carry neither ``client_id`` nor ``azp``, so
+    ``WorkOSTokenVerifier`` reports ``"unknown"`` and that is what lands here.
+    The field is kept because a tenant whose tokens *do* carry the claim gets
+    real per-app attribution from it; recovering it otherwise needs token
+    introspection (PER-65).
     """
     token = get_access_token()
     client_id = (token.client_id or "").strip() if token is not None else ""

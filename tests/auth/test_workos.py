@@ -97,6 +97,24 @@ def test_correct_audience_accepted():
     assert result.subject == "user_01ABC"
 
 
+def test_client_id_falls_back_to_azp():
+    v = make_verifier()
+    result = verify(v, mint(base_claims(azp="client_from_azp")))
+    assert result is not None
+    assert result.client_id == "client_from_azp"
+
+
+def test_client_id_is_unknown_when_no_client_claim():
+    """WorkOS MCP-flow tokens carry neither claim. Reporting the issuer here
+    produced a constant that read as real per-app data in the access log."""
+    v = make_verifier()
+    result = verify(v, mint(base_claims()))
+    assert result is not None
+    assert result.client_id == "unknown"
+    assert result.client_id != ISSUER
+    assert result.client_id != result.subject
+
+
 def test_missing_subject_rejected():
     v = make_verifier()
     claims = base_claims()

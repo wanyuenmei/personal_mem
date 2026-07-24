@@ -39,8 +39,18 @@ def _ctx(request=None, session=None) -> Context:
     return cast(Context, _FakeContext(request, session))
 
 
-def _session_named(name: str):
-    return SimpleNamespace(client_params=SimpleNamespace(clientInfo=SimpleNamespace(name=name)))
+def _request(user_agent: str = "", capability_label=None):
+    """A request as the tool sees it: headers, plus the guard's state slot."""
+    return SimpleNamespace(
+        state=SimpleNamespace(client=capability_label),
+        headers={"user-agent": user_agent} if user_agent else {},
+    )
+
+
+def _stateless_session():
+    """A session as `stateless_http=True` produces it — no `initialize`, so no
+    client_params. The shape production actually emits."""
+    return SimpleNamespace(client_params=None)
 
 
 def _record(caplog) -> dict:
@@ -85,42 +95,64 @@ def test_logs_resolved_tenant_and_oauth_client_id(logged, monkeypatch):
         access_log, "get_access_token", lambda: SimpleNamespace(client_id="client_01XYZ")
     )
 
-    access_log.log_tool_call("add_memory", _ctx(session=_session_named("claude-ai")))
+    access_log.log_tool_call(
+        "add_memory", _ctx(request=_request("claude-ai/1.0"), session=_stateless_session())
+    )
 
     r = _record(logged)
     assert r["user"] == "workos_user_01ABC"
-    assert r["client"] == "claude-ai"
+    assert r["client"] == "claude-ai/1.0"
     assert r["client_id"] == "client_01XYZ"
 
 
-def test_capability_label_wins_over_self_asserted_client_name(logged, monkeypatch):
-    """A server-assigned label is trustworthy; clientInfo is not — prefer it."""
+def test_capability_label_wins_over_self_asserted_user_agent(logged, monkeypatch):
+    """A server-assigned label is trustworthy; a User-Agent is not — prefer it."""
     monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "mei")
-    request = SimpleNamespace(state=SimpleNamespace(client="cursor"))
+    request = _request("pretending-to-be-claude", capability_label="cursor")
 
-    access_log.log_tool_call(
-        "search_memory", _ctx(request=request, session=_session_named("pretending-to-be-claude"))
-    )
+    access_log.log_tool_call("search_memory", _ctx(request=request))
 
     assert _record(logged)["client"] == "cursor"
 
 
-def test_client_name_cannot_forge_sibling_attributes(logged, monkeypatch):
-    """A hostile clientInfo.name must stay one string value, not a second key."""
-    monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "workos_real")
-    hostile = _session_named('x", "user": "workos_victim')
+def test_stateless_session_still_yields_a_client(logged, monkeypatch):
+    """Regression: `clientInfo` is unreachable under stateless_http, so a session
+    with no client_params must still name the caller, from the User-Agent."""
+    monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "mei")
 
-    access_log.log_tool_call("search_memory", _ctx(session=hostile))
+    access_log.log_tool_call(
+        "search_memory", _ctx(request=_request("python-httpx/0.27"), session=_stateless_session())
+    )
+
+    assert _record(logged)["client"] == "python-httpx/0.27"
+
+
+def test_missing_user_agent_falls_back_to_unlabeled(logged, monkeypatch):
+    monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "mei")
+
+    access_log.log_tool_call(
+        "search_memory", _ctx(request=_request(), session=_stateless_session())
+    )
+
+    assert _record(logged)["client"] == "unlabeled"
+
+
+def test_client_name_cannot_forge_sibling_attributes(logged, monkeypatch):
+    """A hostile User-Agent must stay one string value, not a second key."""
+    monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "workos_real")
+    hostile = _request('x", "user": "workos_victim')
+
+    access_log.log_tool_call("search_memory", _ctx(request=hostile))
 
     r = _record(logged)
     assert r["user"] == "workos_real"
     assert r["client"] == 'x", "user": "workos_victim'
 
 
-def test_long_client_name_is_truncated(logged, monkeypatch):
+def test_long_user_agent_is_truncated(logged, monkeypatch):
     monkeypatch.setattr(access_log, "resolve_user_id", lambda ctx: "mei")
 
-    access_log.log_tool_call("search_memory", _ctx(session=_session_named("x" * 500)))
+    access_log.log_tool_call("search_memory", _ctx(request=_request("x" * 500)))
 
     assert len(_record(logged)["client"]) == access_log._MAX_FIELD
 
