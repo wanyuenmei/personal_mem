@@ -143,6 +143,8 @@ class DashboardApp:
             )
 
         try:
+            # store.all caps at its default ceiling (mem0 would otherwise return
+            # only the 20 most recent); browsing/grouping beyond that is PER-84.
             rows = await run_in_threadpool(self.store.all, principal.user_id)
         except Exception:
             logger.exception(

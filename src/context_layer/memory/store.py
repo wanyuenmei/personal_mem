@@ -124,9 +124,17 @@ class ContextStore:
         res = self._mem.search(query, filters={"user_id": user_id}, top_k=limit)
         return _as_results(res)
 
-    def all(self, user_id: Optional[str] = None) -> list[dict]:
+    def all(self, user_id: Optional[str] = None, limit: int = 1000) -> list[dict]:
+        """Every memory for a user, up to `limit`.
+
+        mem0's get_all defaults to top_k=20 — passing no limit silently truncates
+        to the 20 most recent, which is what made the dashboard show only a slice.
+        We pass an explicit, generous ceiling instead. This is a ceiling, not true
+        pagination: browsing an arbitrarily large store (and grouping it into the
+        mind-map view) is PER-84.
+        """
         user_id = _require_user_id(user_id, op="list all memories")
-        res = self._mem.get_all(filters={"user_id": user_id})
+        res = self._mem.get_all(filters={"user_id": user_id}, top_k=limit)
         return _as_results(res)
 
     def delete(self, memory_id: str, user_id: Optional[str] = None) -> dict:

@@ -119,8 +119,23 @@ def test_all_filters_by_user_id_only(fake_mem0):
 
     results = store.all(user_id="alice")
 
-    fake_mem0.get_all.assert_called_once_with(filters={"user_id": "alice"})
+    fake_mem0.get_all.assert_called_once_with(
+        filters={"user_id": "alice"}, top_k=1000
+    )
     assert results == [{"memory": "x"}]
+
+
+def test_all_passes_explicit_limit_as_top_k(fake_mem0):
+    """mem0's get_all defaults to top_k=20; all() must pass a limit through so a
+    caller (e.g. the dashboard) isn't silently truncated to 20 memories."""
+    fake_mem0.get_all.return_value = {"results": []}
+    store = ContextStore()
+
+    store.all(user_id="alice", limit=5000)
+
+    fake_mem0.get_all.assert_called_once_with(
+        filters={"user_id": "alice"}, top_k=5000
+    )
 
 
 def test_delete_removes_memory_owned_by_user(fake_mem0):
