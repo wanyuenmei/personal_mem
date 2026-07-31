@@ -250,6 +250,29 @@ def test_a_sweep_with_no_registered_scopes_reads_no_memories(stub_classify, tmp_
     assert store.updates == []
 
 
+def test_an_empty_registry_is_distinguishable_from_a_pass_that_matched_nothing(
+    registry, stub_classify, tmp_path
+):
+    """Both finish at 0 of 0, and only the scope count says which is which:
+    "no categories to classify into" is not "I checked and nothing matched"."""
+    stub_classify([])
+    empty = ScopeRegistry(sqlite_path=str(tmp_path / "empty.db"))
+    no_scopes = SweepRunner()
+    nothing_matched = SweepRunner()
+
+    no_scopes.start(_FakeStore([{"id": "m1", "memory": "a"}]), empty, "u1")
+    nothing_matched.start(_FakeStore([]), registry, "u1")
+    assert _wait_for(lambda: no_scopes.status("u1").state == "done")
+    assert _wait_for(lambda: nothing_matched.status("u1").state == "done")
+
+    empty_registry = no_scopes.status("u1")
+    matched_nothing = nothing_matched.status("u1")
+    assert (empty_registry.total, empty_registry.changed) == (0, 0)
+    assert (matched_nothing.total, matched_nothing.changed) == (0, 0)
+    assert empty_registry.scope_count == 0
+    assert matched_nothing.scope_count == 1
+
+
 def test_a_failing_sweep_reports_error_not_a_stuck_running(registry, monkeypatch):
     class _Broken:
         def all(self, user_id, limit=1000):

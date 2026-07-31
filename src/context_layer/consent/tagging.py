@@ -127,6 +127,13 @@ class SweepStatus:
     """
 
     state: str = "idle"  # idle | running | done | error
+    # How many scopes the pass had to sort into: zero is "no categories to
+    # classify into", which otherwise reads identically to a real pass that
+    # matched nothing (both are 0 of 0). A count rather than a second terminal
+    # state because ``state`` is the lifecycle and this is a fact about the
+    # input — and because it stays true of a STORED result once the user does
+    # register scopes, where a "no_scopes" state would have to be reread.
+    scope_count: int = 0
     total: int = 0
     processed: int = 0
     changed: int = 0
@@ -197,7 +204,7 @@ class SweepRunner:
         try:
             scopes = registry.all(user_id)
             rows = store.all(user_id) if scopes else []
-            self._update(user_id, total=len(rows))
+            self._update(user_id, scope_count=len(scopes), total=len(rows))
             changed = tag_rows(
                 store,
                 user_id,

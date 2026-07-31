@@ -787,6 +787,34 @@ def test_page_renders_the_sweep_status(capability_app, monkeypatch, tagging_on):
     assert (data["sweep"]["total"], data["sweep"]["processed"]) == (7, 3)
 
 
+def test_page_carries_the_scope_count_a_sweep_ran_with(
+    capability_app, monkeypatch, tagging_on
+):
+    """A stored "0 of 0" means one of two things — no scopes to tag into, or a
+    pass that matched nothing — so the count travels with the status."""
+    _install_runner(
+        monkeypatch,
+        _FakeRunner(status=SweepStatus(state="done", scope_count=2, total=5, changed=1)),
+    )
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["sweep"]["scope_count"] == 2
+
+
+def test_page_points_at_scope_creation_when_none_are_registered(
+    capability_app, monkeypatch, tagging_on
+):
+    """With an empty registry a re-tag could only ever be a no-op, so the panel
+    leads with the step that unblocks it instead of offering the button."""
+    _install_runner(monkeypatch, _FakeRunner())
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert _page_data(resp.text)["scopes"] == []
+    assert "Nothing to tag into yet" in resp.text
+
+
 def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch):
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
     _install_runner(monkeypatch, _FakeRunner())
