@@ -48,6 +48,11 @@ RESERVED_OWNER_SLUG = "user"
 SLUG_MAX_CHARS = 40
 _NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+# Descriptions are shown to the user and bounded so no registration surface
+# (the register_scopes tool, the dashboard's create-scope form) can stuff
+# unbounded text into the registry.
+DESCRIPTION_MAX_CHARS = 300
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS consent_scopes (
     user_id     TEXT NOT NULL,
@@ -76,6 +81,8 @@ _SELECT = (
     "SELECT key, owner_type, owner_name, name, description "
     "FROM consent_scopes WHERE user_id = ?"
 )
+
+_DELETE = "DELETE FROM consent_scopes WHERE user_id = ? AND key = ?"
 
 
 def slugify(raw: str) -> str:
@@ -238,6 +245,24 @@ class ScopeRegistry:
             cur = conn.execute(self._sql(_SELECT + " AND key = ?"), (user_id, key))
             row = cur.fetchone()
             return self._to_scope(row) if row else None
+
+    def delete(self, user_id: Optional[str], key: str) -> bool:
+        """Remove one scope row; True if a row was actually deleted.
+
+        This does not contradict the upsert-only registration rule: that rule
+        stops a PARTY from silently retracting a scope by omitting it from a
+        re-registration. Deletion here is an explicit act by the scope's
+        user-side owner — the dashboard exposes it only for scopes the user
+        created themselves. Tags referencing a deleted key stay in memory
+        metadata but read as untagged (rendering and enforcement join against
+        the registry).
+        """
+        user_id = _require_user_id(user_id, op="delete a consent scope")
+        with closing(self._connect()) as conn:
+            self._ensure_schema(conn)
+            cur = conn.execute(self._sql(_DELETE), (user_id, key))
+            conn.commit()
+            return cur.rowcount > 0
 
     def _list(
         self, conn, user_id: str, *, owner_slug: Optional[str] = None

@@ -1,8 +1,24 @@
-"""The memory browser: a read-only page showing everything stored about you.
+"""The memory browser: everything stored about you, plus scope management.
 
 Sits in front of the MCP app on the HTTP transport and owns every /dashboard*
-path; anything else passes straight through. Read-only by design — it renders
-store.all() and never mutates (edit/delete actions are PER-56 / PER-41).
+path; anything else passes straight through. Reads render store.all() and the
+consent-scope registry; the dashboard is also the consent layer's first
+mutating surface — two form-POST endpoints let the user manage scopes and
+per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
+
+- POST /dashboard/scopes — create or delete a scope the user owns (the
+  reserved "user" owner). Third parties' registrations are never deletable
+  here; their vocabulary is managed by re-registration.
+- POST /dashboard/tags — add or remove one consent-scope tag on one memory,
+  written into mem0 metadata via the tenant-guarded store.update_metadata.
+
+Mutations are guarded by the same principal resolution as the page plus a
+same-origin check (Origin, falling back to Referer, must name the host the
+request arrived at) on top of the samesite=lax session cookie — lax already
+withholds the cookie from cross-site POSTs; the origin check is the backstop.
+Post-mutation redirects are RELATIVE ("../dashboard") so that in capability
+mode the browser resolves them against the token-prefixed URL the guard
+stripped — an absolute /dashboard would escape the prefix and 404.
 
 Auth mirrors the MCP surface's two modes:
 
@@ -13,11 +29,11 @@ Auth mirrors the MCP surface's two modes:
   on every request and transparently refreshes an expired one. The signed-in
   WorkOS user id gets the same prefix identity.resolve_user_id applies to MCP
   bearer tokens, so the browser shows exactly the namespace connectors write to.
-- Capability mode: the guard in front only forwards /dashboard after matching
-  /<token>/dashboard, so reaching this app at all IS the auth, and memories come
-  from the single-tenant default namespace — same trust model as /<token>/mcp.
-  The page must emit no absolute /dashboard/* links in this mode: the browser's
-  real paths carry the token prefix the guard stripped.
+- Capability mode: the guard in front only forwards /dashboard* after matching
+  /<token>/dashboard*, so reaching this app at all IS the auth, and memories
+  come from the single-tenant default namespace — same trust model as
+  /<token>/mcp. The page must emit no absolute /dashboard/* links in this mode:
+  the browser's real paths carry the token prefix the guard stripped.
 
 Starlette Request/Response here is safe with the SSE stream because this app
 fully owns its routes and only ever *forwards* everything else — it never wraps
@@ -42,9 +58,19 @@ from starlette.responses import (
 )
 
 from context_layer import config
+from context_layer.consent import (
+    DESCRIPTION_MAX_CHARS,
+    PROVENANCE_USER,
+    PROVENANCE_USER_REMOVED,
+    RESERVED_OWNER_SLUG,
+    SLUG_MAX_CHARS,
+    ScopeRegistry,
+    slugify,
+    tag_key,
+)
 from context_layer.dashboard.page import render_page
-from context_layer.memory import ContextStore
-from context_layer.observability import log_dashboard_view
+from context_layer.memory import ContextStore, TenantIsolationError
+from context_layer.observability import log_dashboard_action, log_dashboard_view
 
 logger = logging.getLogger("context_layer.dashboard")
 
@@ -52,6 +78,14 @@ SESSION_COOKIE = "wos_session"
 STATE_COOKIE = "wos_oauth_state"
 # Long-lived cookie; the sealed refresh token inside is what actually expires.
 _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+
+# Where a finished mutation sends the browser: resolved RELATIVE to the POST
+# URL (/…/dashboard/scopes or /…/dashboard/tags), so any capability-token
+# prefix in the browser's real URL survives the round trip.
+_BACK_TO_PAGE = "../dashboard"
+
+_AUTH_PATHS = ("/dashboard/login", "/dashboard/callback", "/dashboard/logout")
+_POST_PATHS = ("/dashboard/scopes", "/dashboard/tags")
 
 
 def _json_safe(data: dict) -> dict:
@@ -91,6 +125,7 @@ class DashboardApp:
         *,
         oauth_mode: bool,
         workos_client: Any = None,
+        registry: Optional[ScopeRegistry] = None,
     ) -> None:
         self.app = app
         self.store = store
@@ -98,18 +133,27 @@ class DashboardApp:
         # Injectable for tests; lazily built from config in production so
         # capability-mode deploys never construct a WorkOS client at all.
         self._workos = workos_client
+        # Injectable for tests; defaults to the process-wide registry the
+        # register_scopes tool writes to, so the page shows what tools registered.
+        self._scope_registry = registry
 
     async def __call__(self, scope, receive, send) -> None:
         path = scope.get("path", "") if scope["type"] == "http" else ""
         if path == "/dashboard/":  # tolerate the hand-typed trailing slash
             path = "/dashboard"
-        if path not in ("/dashboard", "/dashboard/login", "/dashboard/callback",
-                        "/dashboard/logout"):
+        if path != "/dashboard" and path not in _AUTH_PATHS + _POST_PATHS:
             await self.app(scope, receive, send)
             return
         request = Request(scope, receive)
-        if request.method != "GET":
-            response: Response = PlainTextResponse("method not allowed", status_code=405)
+        if path in _POST_PATHS:
+            if request.method != "POST":
+                response: Response = PlainTextResponse(
+                    "method not allowed", status_code=405
+                )
+            else:
+                response = await self._mutate(request, path)
+        elif request.method != "GET":
+            response = PlainTextResponse("method not allowed", status_code=405)
         elif path != "/dashboard" and not self.oauth_mode:
             # The auth sub-paths exist only for the AuthKit flow. In capability
             # mode any redirect they issued would point at the bare /dashboard,
@@ -128,45 +172,220 @@ class DashboardApp:
 
     # --- the page itself ------------------------------------------------
 
-    async def _view(self, request: Request) -> Response:
+    async def _principal(self, request: Request) -> Optional[_Principal]:
+        """The viewer, per auth mode. None only in OAuth mode with no session."""
         if self.oauth_mode:
-            principal = await self._authenticate_browser(request)
-            if principal is None:
-                if not config.dashboard_login_enabled():
-                    return PlainTextResponse(_LOGIN_UNCONFIGURED, status_code=503)
-                return RedirectResponse("/dashboard/login", status_code=302)
-        else:
-            # Capability mode: the path guard already authenticated this
-            # request, and everything lives in the single-tenant namespace.
-            principal = _Principal(
-                user_id=config.DEFAULT_USER_ID, label=config.DEFAULT_USER_ID
-            )
+            return await self._authenticate_browser(request)
+        # Capability mode: the path guard already authenticated this request,
+        # and everything lives in the single-tenant namespace.
+        return _Principal(
+            user_id=config.DEFAULT_USER_ID, label=config.DEFAULT_USER_ID
+        )
+
+    async def _view(self, request: Request) -> Response:
+        principal = await self._principal(request)
+        if principal is None:
+            if not config.dashboard_login_enabled():
+                return PlainTextResponse(_LOGIN_UNCONFIGURED, status_code=503)
+            return RedirectResponse("/dashboard/login", status_code=302)
 
         try:
             # store.all caps at its default ceiling (mem0 would otherwise return
             # only the 20 most recent); browsing/grouping beyond that is PER-84.
             rows = await run_in_threadpool(self.store.all, principal.user_id)
+            scopes = await run_in_threadpool(
+                self._registry().all, principal.user_id
+            )
         except Exception:
             logger.exception(
-                "dashboard failed to list memories for user=%s", principal.user_id
+                "dashboard failed to load memories/scopes for user=%s",
+                principal.user_id,
             )
             return PlainTextResponse(
                 "Couldn't load your memories (backend error). Try again shortly.",
                 status_code=500,
             )
 
-        # Mirror _client_label's trust order: the capability guard's stamped
-        # token label (server-assigned) over the User-Agent (self-asserted).
-        client = getattr(request.state, "client", None)
-        log_dashboard_view(
-            principal.user_id, str(client or request.headers.get("user-agent") or "")
-        )
+        log_dashboard_view(principal.user_id, self._client_label(request))
         response: Response = HTMLResponse(
-            render_page(rows, user_label=principal.label, show_logout=self.oauth_mode)
+            render_page(
+                rows, scopes,
+                user_label=principal.label, show_logout=self.oauth_mode,
+            )
         )
         if principal.fresh_cookie:
             self._set_session_cookie(response, principal.fresh_cookie)
         return response
+
+    # --- mutations (scopes + tags) ----------------------------------------
+
+    async def _mutate(self, request: Request, path: str) -> Response:
+        principal = await self._principal(request)
+        if principal is None:
+            # A POST can't run the sign-in flow; make the browser reload the
+            # page, which will.
+            return PlainTextResponse(
+                "Your session has expired — reload the dashboard and sign in.",
+                status_code=403,
+            )
+        if not self._same_origin(request):
+            return PlainTextResponse(
+                "cross-origin request rejected", status_code=403
+            )
+        form = await request.form()
+        fields = {key: str(value) for key, value in form.items()}
+        try:
+            if path == "/dashboard/scopes":
+                response = await self._scopes_action(fields, principal, request)
+            else:
+                response = await self._tags_action(fields, principal, request)
+        except Exception:
+            logger.exception(
+                "dashboard mutation failed for user=%s path=%s",
+                principal.user_id, path,
+            )
+            return PlainTextResponse(
+                "Couldn't save that change (backend error). Try again shortly.",
+                status_code=500,
+            )
+        if principal.fresh_cookie:
+            self._set_session_cookie(response, principal.fresh_cookie)
+        return response
+
+    async def _scopes_action(
+        self, fields: dict, principal: _Principal, request: Request
+    ) -> Response:
+        """Create or delete one of the user's OWN scopes (owner slug "user").
+
+        Third parties' scopes are never touchable here: their vocabulary is
+        theirs to re-register, and deleting one from under a party would
+        silently orphan whatever the user tagged with it.
+        """
+        action = fields.get("action") or ""
+        registry = self._registry()
+        if action == "create":
+            name = (fields.get("name") or "").strip()
+            description = (fields.get("description") or "").strip()
+            if not slugify(name):
+                return PlainTextResponse(
+                    "Scope name needs at least one letter or digit.",
+                    status_code=400,
+                )
+            if len(name) > SLUG_MAX_CHARS:
+                return PlainTextResponse(
+                    f"Scope name is too long (max {SLUG_MAX_CHARS} characters).",
+                    status_code=400,
+                )
+            if len(description) > DESCRIPTION_MAX_CHARS:
+                return PlainTextResponse(
+                    f"Description is too long (max {DESCRIPTION_MAX_CHARS} "
+                    "characters).",
+                    status_code=400,
+                )
+            await run_in_threadpool(
+                registry.register,
+                principal.user_id,
+                owner_type="user",
+                owner_slug=RESERVED_OWNER_SLUG,
+                scopes=[(name, description)],
+            )
+        elif action == "delete":
+            key = (fields.get("key") or "").strip()
+            scope = await run_in_threadpool(registry.get, principal.user_id, key)
+            if scope is None:
+                return PlainTextResponse("no such scope", status_code=404)
+            if scope.owner_name != RESERVED_OWNER_SLUG:
+                return PlainTextResponse(
+                    "Only scopes you created yourself can be deleted.",
+                    status_code=403,
+                )
+            await run_in_threadpool(registry.delete, principal.user_id, key)
+        else:
+            return PlainTextResponse("unknown scope action", status_code=400)
+        log_dashboard_action(
+            principal.user_id, f"scopes_{action}", self._client_label(request)
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _tags_action(
+        self, fields: dict, principal: _Principal, request: Request
+    ) -> Response:
+        """Add or remove one consent-scope tag on one memory.
+
+        Both actions are unconditional writes of a provenance value under the
+        scope's cs_* metadata key: add stamps `user` (manual, survives
+        re-sweeps), remove stamps the `user_removed` tombstone rather than
+        deleting the key — mem0's update merges metadata and cannot remove
+        keys, and the tombstone is what stops the classifier (VC-88) from
+        re-applying a tag the user vetoed. Re-adding over a tombstone stamps
+        `user` again.
+        """
+        action = fields.get("action") or ""
+        memory_id = (fields.get("memory_id") or "").strip()
+        scope_key = (fields.get("scope_key") or "").strip()
+        if action not in ("add", "remove"):
+            return PlainTextResponse("unknown tag action", status_code=400)
+        if not memory_id or not scope_key:
+            return PlainTextResponse(
+                "memory_id and scope_key are required", status_code=400
+            )
+        scope = await run_in_threadpool(
+            self._registry().get, principal.user_id, scope_key
+        )
+        if scope is None:
+            return PlainTextResponse("no such scope", status_code=404)
+        provenance = PROVENANCE_USER if action == "add" else PROVENANCE_USER_REMOVED
+        try:
+            result = await run_in_threadpool(
+                self.store.update_metadata,
+                memory_id,
+                {tag_key(scope_key): provenance},
+                principal.user_id,
+            )
+        except TenantIsolationError:
+            # Another tenant's memory id: for THIS viewer it doesn't exist, and
+            # the response must not reveal otherwise. Logged as a warning — a
+            # browser shouldn't be able to produce foreign ids by accident.
+            logger.warning(
+                "dashboard tag write refused: memory %r is not user %r's",
+                memory_id, principal.user_id,
+            )
+            return PlainTextResponse("no such memory", status_code=404)
+        if not result.get("updated"):
+            return PlainTextResponse("no such memory", status_code=404)
+        log_dashboard_action(
+            principal.user_id, f"tags_{action}", self._client_label(request)
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    @staticmethod
+    def _same_origin(request: Request) -> bool:
+        """CSRF backstop for the POST endpoints: the browser-set Origin (or
+        Referer, which older browsers send where Origin is omitted) must name
+        exactly the host this request arrived at. Requests carrying neither
+        header are rejected — the mutating surface is browser-only, and a
+        browser form POST always sends at least one of them.
+        """
+        source = request.headers.get("origin") or request.headers.get("referer") or ""
+        host = (request.headers.get("host") or "").strip().lower()
+        return bool(host) and urlsplit(source).netloc.lower() == host
+
+    def _registry(self) -> ScopeRegistry:
+        if self._scope_registry is None:
+            # Imported lazily to mirror how transport keeps tool modules out of
+            # import time; get_registry() is the same instance register_scopes
+            # writes to, so tool registrations show up here without re-reads.
+            from context_layer.tools.consent_tools import get_registry
+
+            self._scope_registry = get_registry()
+        return self._scope_registry
+
+    @staticmethod
+    def _client_label(request: Request) -> str:
+        """Mirror the access log's trust order: the capability guard's stamped
+        token label (server-assigned) over the User-Agent (self-asserted)."""
+        client = getattr(request.state, "client", None)
+        return str(client or request.headers.get("user-agent") or "")
 
     # --- AuthKit browser session ------------------------------------------
 

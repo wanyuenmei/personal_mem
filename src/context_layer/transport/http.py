@@ -52,10 +52,16 @@ def build_asgi_app(mcp):
     # the process-wide ContextStore (embedder and all), which nothing should
     # pay for just by importing the transport layer.
     from context_layer.dashboard import DashboardApp
+    from context_layer.tools.consent_tools import get_registry
     from context_layer.tools.memory_tools import get_store
 
     inner = DashboardApp(
-        mcp.streamable_http_app(), get_store(), oauth_mode=workos_enabled()
+        mcp.streamable_http_app(),
+        get_store(),
+        oauth_mode=workos_enabled(),
+        # The same registry instance register_scopes writes to, so the page
+        # shows a party's vocabulary the moment it registers.
+        registry=get_registry(),
     )
     if workos_enabled():
         guarded = RateLimitGuard(inner, RATE_LIMIT_RPM)

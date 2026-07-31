@@ -1,8 +1,11 @@
-"""Dashboard tests: auth mode behavior, tenant scoping, and safe rendering.
+"""Dashboard tests: auth mode behavior, tenant scoping, safe rendering, and
+the mutating endpoints (scope create/delete, per-memory tag add/remove).
 
-The store is a plain stub (only .all is used — the page is read-only), and the
-WorkOS client is a stub injected through DashboardApp's workos_client seam, so
-none of these tests touch a real backend or the network.
+The store is a stub (.all for the page, .update_metadata for tag writes), the
+WorkOS client is a stub injected through DashboardApp's workos_client seam,
+and the scope registry is a REAL ScopeRegistry over temp SQLite (its rows are
+what the mutation tests assert on), so none of these tests touch a real
+memory backend or the network.
 """
 
 import dataclasses
@@ -18,7 +21,12 @@ from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
 from context_layer import config
+from context_layer.consent import RESERVED_OWNER_SLUG, ScopeRegistry
 from context_layer.dashboard import DashboardApp
+from context_layer.memory import TenantIsolationError
+
+# What a browser sends on a same-origin form POST to the TestClient host.
+_ORIGIN = {"origin": "http://testserver"}
 
 
 async def _inner_app(scope, receive, send):
@@ -36,7 +44,18 @@ def store():
         {"id": "m1", "memory": "likes dark roast", "created_at": "2026-07-01T00:00:00Z"},
         {"id": "m2", "memory": "lives in Berlin", "created_at": "2026-07-02T00:00:00Z"},
     ]
+    fake.update_metadata.return_value = {"updated": True, "id": "m1"}
     return fake
+
+
+@pytest.fixture
+def registry(tmp_path):
+    return ScopeRegistry(sqlite_path=str(tmp_path / "consent.db"))
+
+
+@pytest.fixture
+def capability_app(store, registry):
+    return DashboardApp(_inner_app, store, oauth_mode=False, registry=registry)
 
 
 @pytest.fixture
@@ -318,3 +337,347 @@ def test_dead_session_redirects_to_login(store, oauth_config):
     assert resp.status_code == 302
     assert resp.headers["location"] == "/dashboard/login"
     store.all.assert_not_called()
+
+
+# --- the scopes panel on the page ----------------------------------------
+
+
+def test_page_embeds_registered_scopes_and_memory_tags(store, registry, capability_app):
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="third_party",
+        owner_slug="tastebuds",
+        scopes=[("dietary", "food preferences")],
+    )
+    store.all.return_value = [
+        {
+            "id": "m1",
+            "memory": "likes dark roast",
+            "created_at": "2026-07-01T00:00:00Z",
+            "metadata": {"cs_dietary__tastebuds": "user"},
+        }
+    ]
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert resp.status_code == 200
+    assert "dietary__tastebuds" in resp.text
+    assert "food preferences" in resp.text
+
+
+def test_removed_tags_read_as_untagged_in_the_payload(store, capability_app):
+    store.all.return_value = [
+        {
+            "id": "m1",
+            "memory": "x",
+            "created_at": "",
+            "metadata": {"cs_health__user": "user_removed"},
+        }
+    ]
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert '"tags": {}' in resp.text
+
+
+def test_scope_description_cannot_break_out_of_the_data_block(
+    store, registry, capability_app
+):
+    """Scope names/descriptions are third-party-supplied text and ride the
+    same JSON data block as memory text — same escape guarantees required."""
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="third_party",
+        owner_slug="evil",
+        scopes=[("dietary", "</script><script>alert(1)</script>")],
+    )
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert resp.text.count("</script>") == 2
+
+
+# --- mutations: scope create/delete ---------------------------------------
+
+
+def test_create_scope_registers_under_the_reserved_owner(registry, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/scopes",
+        data={"action": "create", "name": "Journaling", "description": "private notes"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    [scope] = registry.all(config.DEFAULT_USER_ID)
+    assert scope.key == "journaling__user"
+    assert scope.owner_type == "user"
+    assert scope.owner_name == RESERVED_OWNER_SLUG
+    assert scope.description == "private notes"
+
+
+def test_create_scope_rejects_an_unsluggable_name(registry, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/scopes",
+        data={"action": "create", "name": "!!!"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 400
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_delete_scope_removes_only_your_own(registry, capability_app):
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("journaling", "")],
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/scopes",
+        data={"action": "delete", "key": "journaling__user"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_delete_scope_refuses_a_third_partys_scope(registry, capability_app):
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="third_party",
+        owner_slug="tastebuds",
+        scopes=[("dietary", "")],
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/scopes",
+        data={"action": "delete", "key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 403
+    assert len(registry.all(config.DEFAULT_USER_ID)) == 1
+
+
+def test_delete_of_unknown_scope_is_404(capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/scopes",
+        data={"action": "delete", "key": "nope__user"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+
+
+# --- mutations: tag add/remove --------------------------------------------
+
+
+def _register_dietary(registry, user_id=None):
+    registry.register(
+        user_id or config.DEFAULT_USER_ID,
+        owner_type="third_party",
+        owner_slug="tastebuds",
+        scopes=[("dietary", "")],
+    )
+
+
+def test_tag_add_writes_user_provenance(store, registry, capability_app):
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    store.update_metadata.assert_called_once_with(
+        "m1", {"cs_dietary__tastebuds": "user"}, config.DEFAULT_USER_ID
+    )
+
+
+def test_tag_remove_writes_the_user_removed_tombstone(store, registry, capability_app):
+    """Removal is a tombstone, not a key deletion: mem0's update merges
+    metadata (keys can't be removed through it), and the tombstone is what
+    stops the classifier from re-applying a vetoed tag."""
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "remove", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    store.update_metadata.assert_called_once_with(
+        "m1", {"cs_dietary__tastebuds": "user_removed"}, config.DEFAULT_USER_ID
+    )
+
+
+def test_tagging_with_an_unregistered_scope_is_404(store, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "nope__nobody"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+    store.update_metadata.assert_not_called()
+
+
+def test_tagging_anothers_memory_is_404_not_an_error_leak(
+    store, registry, capability_app
+):
+    """The store's tenant guard raises on a foreign memory id; the browser
+    surface must translate that to the same 404 an absent id gets."""
+    _register_dietary(registry)
+    store.update_metadata.side_effect = TenantIsolationError("cross-tenant")
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m9", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+    assert "cross-tenant" not in resp.text
+
+
+def test_tagging_an_absent_memory_is_404(store, registry, capability_app):
+    _register_dietary(registry)
+    store.update_metadata.return_value = {
+        "updated": False, "id": "gone", "reason": "not_found",
+    }
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "gone", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+
+
+def test_tag_action_must_be_add_or_remove(store, registry, capability_app):
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "purge", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 400
+    store.update_metadata.assert_not_called()
+
+
+# --- mutation guards -------------------------------------------------------
+
+
+def test_posts_without_origin_or_referer_are_rejected(store, registry, capability_app):
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+    )
+
+    assert resp.status_code == 403
+    store.update_metadata.assert_not_called()
+
+
+def test_cross_origin_posts_are_rejected(store, registry, capability_app):
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403
+    store.update_metadata.assert_not_called()
+
+
+def test_same_origin_referer_passes_when_origin_is_absent(
+    store, registry, capability_app
+):
+    _register_dietary(registry)
+
+    resp = _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers={"referer": "http://testserver/tok123/dashboard"},
+    )
+
+    assert resp.status_code == 303
+
+
+def test_get_on_a_mutation_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/tags").status_code == 405
+    assert _client(capability_app).get("/dashboard/scopes").status_code == 405
+
+
+def test_oauth_post_without_a_session_is_403(store, registry, oauth_config):
+    """A POST can't bounce through the sign-in flow, so an expired/absent
+    session refuses rather than redirects — and nothing is written."""
+    app = DashboardApp(
+        _inner_app, store, oauth_mode=True,
+        workos_client=MagicMock(), registry=registry,
+    )
+
+    resp = _client(app).post(
+        "/dashboard/scopes",
+        data={"action": "create", "name": "journaling"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 403
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_oauth_post_writes_under_the_signed_in_namespace(
+    store, registry, oauth_config
+):
+    workos = MagicMock()
+    session = workos.user_management.load_sealed_session.return_value
+    session.authenticate.return_value = SimpleNamespace(
+        authenticated=True,
+        user={"id": "user_123", "email": "mei@example.com"},
+    )
+    app = DashboardApp(
+        _inner_app, store, oauth_mode=True, workos_client=workos, registry=registry,
+    )
+    client = _client(app)
+    client.cookies.set("wos_session", "sealed-blob")
+
+    resp = client.post(
+        "/dashboard/scopes",
+        data={"action": "create", "name": "journaling"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    user_id = f"{config.WORKOS_USER_ID_PREFIX}user_123"
+    assert [s.key for s in registry.all(user_id)] == ["journaling__user"]
+
+
+def test_mutations_log_a_dashboard_action(store, registry, capability_app, caplog):
+    _register_dietary(registry)
+    caplog.set_level(logging.INFO, logger="context_layer.access")
+
+    _client(capability_app).post(
+        "/dashboard/tags",
+        data={"action": "add", "memory_id": "m1", "scope_key": "dietary__tastebuds"},
+        headers=_ORIGIN,
+    )
+
+    [record] = [r for r in caplog.records if "dashboard_action" in r.getMessage()]
+    logged = json.loads(record.getMessage())
+    assert logged["action"] == "tags_add"
+    assert logged["user"] == config.DEFAULT_USER_ID
