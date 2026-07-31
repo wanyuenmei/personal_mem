@@ -21,7 +21,13 @@ from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
 from context_layer import config
-from context_layer.consent import RESERVED_OWNER_SLUG, ScopeRegistry, SweepStatus
+from context_layer.consent import (
+    RESERVED_OWNER_SLUG,
+    ScopeProposal,
+    ScopeRegistry,
+    SuggestionStatus,
+    SweepStatus,
+)
 from context_layer.dashboard import DashboardApp
 from context_layer.dashboard import app as app_module
 from context_layer.memory import TenantIsolationError
@@ -794,3 +800,206 @@ def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch)
     data = _page_data(_client(capability_app).get("/dashboard").text)
 
     assert data["tagging_enabled"] is False
+
+
+# --- suggesting scopes from memories --------------------------------------
+
+
+class _FakeSuggestionRunner:
+    """Stands in for the process-wide SuggestionRunner: records start() and
+    take() calls and reports whatever status a test wants rendered."""
+
+    def __init__(self, started=True, status=None, proposals=()):
+        self.started = started
+        self._status = status or SuggestionStatus()
+        self._proposals = list(proposals)
+        self.calls = []
+        self.taken = []
+
+    def start(self, store, registry, user_id):
+        self.calls.append(user_id)
+        return self.started
+
+    def status(self, user_id):
+        return self._status
+
+    def take(self, user_id, keys):
+        self.taken.append((user_id, list(keys)))
+        return [p for p in self._proposals if p.key in set(keys)]
+
+
+def _install_suggester(monkeypatch, runner):
+    monkeypatch.setattr(app_module, "get_suggestion_runner", lambda: runner)
+    return runner
+
+
+def test_suggest_run_starts_a_background_pass(capability_app, monkeypatch, tagging_on):
+    runner = _install_suggester(monkeypatch, _FakeSuggestionRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    assert runner.calls == [config.DEFAULT_USER_ID]
+
+
+def test_suggest_run_is_refused_when_the_classifier_is_off(capability_app, monkeypatch):
+    """Suggesting reads memories with the same model classification uses, so
+    it is off wherever that is — and says so instead of starting."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    runner = _install_suggester(monkeypatch, _FakeSuggestionRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 409
+    assert runner.calls == []
+
+
+def test_only_ticked_proposals_are_registered(
+    registry, capability_app, monkeypatch, tagging_on
+):
+    """The whole point of the checklist: a scope key is what a later consent
+    grant is written against, so nothing enters the vocabulary unasked."""
+    _install_suggester(
+        monkeypatch,
+        _FakeSuggestionRunner(
+            proposals=[
+                ScopeProposal(name="travel", description="trips"),
+                ScopeProposal(name="health", description="the doctor stuff"),
+            ]
+        ),
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    [scope] = registry.all(config.DEFAULT_USER_ID)
+    assert scope.key == "travel__user"
+    assert scope.owner_type == "user"
+    assert scope.owner_name == RESERVED_OWNER_SLUG
+    assert scope.description == "trips"
+
+
+def test_confirming_nothing_registers_nothing(
+    registry, capability_app, monkeypatch, tagging_on
+):
+    runner = _install_suggester(
+        monkeypatch,
+        _FakeSuggestionRunner(proposals=[ScopeProposal(name="travel", description="")]),
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "confirm"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    assert runner.taken == [(config.DEFAULT_USER_ID, [])]
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_confirming_a_key_the_server_never_proposed_registers_nothing(
+    registry, capability_app, monkeypatch, tagging_on
+):
+    """Ticked keys are resolved against the proposals the server is holding,
+    so a posted-back key can't conjure a scope out of nothing."""
+    _install_suggester(
+        monkeypatch,
+        _FakeSuggestionRunner(proposals=[ScopeProposal(name="travel", description="")]),
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["invented__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_confirming_over_an_existing_scope_keeps_the_existing_description(
+    registry, capability_app, monkeypatch, tagging_on
+):
+    """Registration upserts, so a collision must be skipped: the description
+    the user wrote outranks the one a model proposed."""
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("travel", "what I wrote myself")],
+    )
+    _install_suggester(
+        monkeypatch,
+        _FakeSuggestionRunner(
+            proposals=[ScopeProposal(name="travel", description="what a model wrote")]
+        ),
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    [scope] = registry.all(config.DEFAULT_USER_ID)
+    assert scope.description == "what I wrote myself"
+
+
+def test_an_unknown_suggestion_action_is_400(capability_app, monkeypatch, tagging_on):
+    runner = _install_suggester(monkeypatch, _FakeSuggestionRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "register-everything"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 400
+    assert runner.calls == []
+
+
+def test_cross_origin_suggest_is_rejected(capability_app, monkeypatch, tagging_on):
+    runner = _install_suggester(monkeypatch, _FakeSuggestionRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "run"},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403
+    assert runner.calls == []
+
+
+def test_get_on_the_suggest_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/suggest").status_code == 405
+
+
+def test_page_renders_proposals_awaiting_approval(
+    capability_app, monkeypatch, tagging_on
+):
+    _install_suggester(
+        monkeypatch,
+        _FakeSuggestionRunner(
+            status=SuggestionStatus(
+                state="done",
+                sampled=12,
+                proposals=[ScopeProposal(name="travel", description="trips")],
+            )
+        ),
+    )
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["suggest"]["state"] == "done"
+    assert data["suggest"]["sampled"] == 12
+    assert data["suggest"]["proposals"] == [
+        {"key": "travel__user", "name": "travel", "description": "trips"}
+    ]

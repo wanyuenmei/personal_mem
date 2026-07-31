@@ -134,14 +134,22 @@ _PAGE = """<!doctype html>
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
   .muted { color: var(--muted); font-size: .85rem; margin: .25rem 0; }
-  #sweep { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
-           margin-top: .6rem; }
-  #sweep button {
+  #sweep, #suggest {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    margin-top: .6rem;
+  }
+  #sweep button, #suggest button {
     padding: .25rem .7rem; font-size: .82rem; cursor: pointer; color: var(--fg);
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
-  #sweep button:disabled { cursor: default; opacity: .6; }
-  #sweep .muted { margin: 0; }
+  #sweep button:disabled, #suggest button:disabled { cursor: default; opacity: .6; }
+  #sweep .muted, #suggest .muted { margin: 0; }
+  .suggestions { flex: 1 1 100%; }
+  .suggestions label {
+    display: flex; align-items: baseline; gap: .4rem; font-size: .85rem;
+    margin: .3rem 0;
+  }
+  .suggestions .desc { color: var(--muted); }
   #search {
     width: 100%; padding: .6rem .8rem; font-size: 1rem; color: var(--fg);
     background: var(--card); border: 1px solid var(--border);
@@ -164,6 +172,7 @@ _PAGE = """<!doctype html>
   <section id="scopes-panel">
     <h2>Consent scopes</h2>
     <div id="scopes"></div>
+    <div id="suggest"></div>
     <div id="sweep"></div>
     <details class="new-scope">
       <summary>Create your own scope</summary>
@@ -232,8 +241,9 @@ _PAGE = """<!doctype html>
     if (!scopes.length) {
       const empty = document.createElement("p");
       empty.className = "muted";
-      empty.textContent = "No scopes yet — connected apps register the " +
-        "categories they care about, or create your own below.";
+      empty.textContent = "No scopes yet — until there are, there is nothing " +
+        "to tag your memories with. Start from what you have already stored, " +
+        "or create your own below; connected apps register their own.";
       panel.appendChild(empty);
       return;
     }
@@ -268,6 +278,82 @@ _PAGE = """<!doctype html>
     }
   }
 
+  // The checklist a finished suggestion run produces. Only ticked proposals
+  // are submitted, and the server registers them from its own copy — the page
+  // posts back keys, never scope names a model wrote.
+  function checklist(proposals) {
+    const form = postForm("suggest", { action: "confirm" });
+    form.className = "suggestions";
+    const intro = document.createElement("p");
+    intro.className = "muted";
+    intro.textContent = "Suggested from your memories \\u2014 tick the ones to " +
+      "keep. Nothing is added until you do.";
+    form.appendChild(intro);
+    for (const p of proposals) {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.name = "key";
+      box.value = p.key;
+      const name = document.createElement("strong");
+      name.textContent = p.name;
+      label.append(box, name);
+      if (p.description) {
+        const desc = document.createElement("span");
+        desc.className = "desc";
+        desc.textContent = p.description;
+        label.appendChild(desc);
+      }
+      form.appendChild(label);
+    }
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = "Add selected scopes";
+    form.appendChild(btn);
+    return form;
+  }
+
+  // Where a vocabulary comes from when there isn't one: propose categories
+  // from the memories already stored. Like the sweep, the run happens on the
+  // server in the background and this reflects it on reload.
+  function renderSuggest() {
+    const el = document.getElementById("suggest");
+    // The sweep panel's note already explains why nothing model-driven runs.
+    if (!data.tagging_enabled) return;
+    const s = data.suggest || {};
+    const proposals = s.proposals || [];
+    if (proposals.length) {
+      el.appendChild(checklist(proposals));
+      return;
+    }
+    const running = s.state === "running";
+    const form = postForm("suggest", { action: "run" });
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = running
+      ? "Reading your memories\\u2026"
+      : "Suggest scopes from my memories";
+    btn.disabled = running;
+    form.appendChild(btn);
+    el.appendChild(form);
+    const note = document.createElement("p");
+    note.className = "muted";
+    if (running) {
+      note.textContent = "Looking for categories worth having\\u2026";
+      setTimeout(() => location.reload(), 3000);
+    } else if (s.state === "error") {
+      note.textContent = "Couldn't suggest scopes (" + s.error + "). Try again.";
+    } else if (s.state === "done") {
+      note.textContent = s.sampled
+        ? "Nothing new suggested from " + s.sampled + " memories."
+        : "Nothing stored yet to suggest from.";
+    } else {
+      note.textContent = "Reads your memories once and proposes categories " +
+        "\\u2014 you pick which to keep.";
+    }
+    el.appendChild(note);
+  }
+
   // The re-tag control plus whatever the last/current sweep is doing. Status
   // is in-process on the server, so "running" advances by reloading the page
   // rather than by polling an endpoint that doesn't exist.
@@ -276,9 +362,9 @@ _PAGE = """<!doctype html>
     const note = document.createElement("p");
     note.className = "muted";
     if (!data.tagging_enabled) {
-      note.textContent = "Automatic tagging is off on this server " +
-        "(EXTRACTION_MODE is not anthropic), so no memory is ever sent to a " +
-        "model. You can still tag memories yourself below.";
+      note.textContent = "Automatic tagging and scope suggestions are off on " +
+        "this server (EXTRACTION_MODE is not anthropic), so no memory is ever " +
+        "sent to a model. You can still create scopes and tag memories yourself.";
       el.appendChild(note);
       return;
     }
@@ -383,6 +469,7 @@ _PAGE = """<!doctype html>
   }
 
   renderScopes();
+  renderSuggest();
   renderSweep();
   search.addEventListener("input", () => render(search.value));
   render("");
@@ -399,14 +486,17 @@ def render_page(
     user_label: str,
     show_logout: bool,
     sweep: Optional[dict] = None,
+    suggest: Optional[dict] = None,
     tagging_enabled: bool = False,
 ) -> str:
     """Render the full memory-browser document for one user's rows + scopes.
 
     ``sweep`` is the in-process status of that user's re-tagging run (see
-    consent.tagging.SweepStatus) and ``tagging_enabled`` says whether the
-    classifier can run here at all — the panel explains the off state rather
-    than offering a button that would do nothing.
+    consent.tagging.SweepStatus), ``suggest`` the status of their scope-
+    suggestion run including any proposals awaiting approval (see
+    consent.discovery.SuggestionStatus), and ``tagging_enabled`` says whether
+    the model those two need can run here at all — the panel explains the off
+    state rather than offering buttons that would do nothing.
     """
     who = f"{html.escape(user_label)} &middot; <span id=\"count\"></span> memories"
     if show_logout:
@@ -415,6 +505,7 @@ def render_page(
         "memories": _rows_to_payload(rows),
         "scopes": _scopes_to_payload(scopes),
         "sweep": sweep or {"state": "idle"},
+        "suggest": suggest or {"state": "idle"},
         "tagging_enabled": bool(tagging_enabled),
     }
     return _PAGE.replace("__WHO__", who).replace("__DATA__", _json_for_script(data))

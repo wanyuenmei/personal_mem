@@ -55,9 +55,31 @@ def classifier_enabled() -> bool:
     return config.EXTRACTION_MODE == "anthropic"
 
 
-def _one_line(text: str) -> str:
-    """``text`` with every run of whitespace collapsed to a single space."""
+def one_line(text: str) -> str:
+    """``text`` with every run of whitespace collapsed to a single space.
+
+    The flattening that keeps text nobody here wrote — a scope description, a
+    stored memory — from forging extra structure in a prompt that promises one
+    item per line. Shared with the scope-discovery pass, which lists memories
+    the same way.
+    """
     return " ".join((text or "").split())
+
+
+def parse_json_reply(raw: str) -> object:
+    """The JSON value in a model reply, or ``None`` when there isn't one.
+
+    Both prompts in the consent layer ask for JSON and nothing else, and both
+    have to survive a model that adds a ```json fence (or prose) anyway.
+    """
+    text = _FENCE_RE.sub("", raw or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        logger.warning("a model reply was not JSON; treating it as empty")
+        return None
 
 
 def vocabulary_lines(scopes: Sequence[ConsentScope]) -> str:
@@ -81,7 +103,7 @@ def vocabulary_lines(scopes: Sequence[ConsentScope]) -> str:
     enforces access off the resulting tags.
     """
     return "\n".join(
-        f"- {scope.key}: {_one_line(scope.description) or _one_line(scope.name)}"
+        f"- {scope.key}: {one_line(scope.description) or one_line(scope.name)}"
         for scope in scopes
     )
 
@@ -106,13 +128,8 @@ def _parse(raw: str, valid_keys: set[str]) -> list[str]:
     registered — is dropped rather than trusted, so a hallucinated category
     can never become a tag.
     """
-    text = _FENCE_RE.sub("", raw).strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except ValueError:
-        logger.warning("scope classifier returned non-JSON; treating as untagged")
+    parsed = parse_json_reply(raw)
+    if parsed is None:
         return []
     if not isinstance(parsed, list):
         logger.warning("scope classifier returned %s, not a list", type(parsed).__name__)

@@ -3,7 +3,7 @@
 Sits in front of the MCP app on the HTTP transport and owns every /dashboard*
 path; anything else passes straight through. Reads render store.all() and the
 consent-scope registry; the dashboard is also the consent layer's first
-mutating surface — three form-POST endpoints let the user manage scopes and
+mutating surface — four form-POST endpoints let the user manage scopes and
 per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
 
 - POST /dashboard/scopes — create or delete a scope the user owns (the
@@ -16,6 +16,11 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   progress on reload. This is the rebuild path after any vocabulary change,
   and it is user-triggered by design — classification never runs on a page
   view.
+- POST /dashboard/suggest — action=run proposes scopes from the memories
+  already stored (one batched call, backgrounded like the sweep); action=
+  confirm registers only the proposals the user ticked, as their own scopes.
+  Nothing reaches the registry without that second POST: the vocabulary is
+  what future consent grants are written against, so it stays user-chosen.
 
 Mutations are guarded by the same principal resolution as the page plus a
 same-origin check (Origin, falling back to Referer, must name the host the
@@ -54,6 +59,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.responses import (
     HTMLResponse,
@@ -71,7 +77,9 @@ from context_layer.consent import (
     SLUG_MAX_CHARS,
     ScopeRegistry,
     classifier_enabled,
+    get_suggestion_runner,
     get_sweep_runner,
+    register_proposals,
     slugify,
     tag_key,
 )
@@ -92,7 +100,12 @@ _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 _BACK_TO_PAGE = "../dashboard"
 
 _AUTH_PATHS = ("/dashboard/login", "/dashboard/callback", "/dashboard/logout")
-_POST_PATHS = ("/dashboard/scopes", "/dashboard/tags", "/dashboard/sweep")
+_POST_PATHS = (
+    "/dashboard/scopes",
+    "/dashboard/tags",
+    "/dashboard/sweep",
+    "/dashboard/suggest",
+)
 
 
 def _json_safe(data: dict) -> dict:
@@ -219,6 +232,7 @@ class DashboardApp:
                 rows, scopes,
                 user_label=principal.label, show_logout=self.oauth_mode,
                 sweep=get_sweep_runner().status(principal.user_id).as_dict(),
+                suggest=get_suggestion_runner().status(principal.user_id).as_dict(),
                 tagging_enabled=classifier_enabled(),
             )
         )
@@ -248,6 +262,13 @@ class DashboardApp:
                 response = await self._scopes_action(fields, principal, request)
             elif path == "/dashboard/sweep":
                 response = await self._sweep_action(principal, request)
+            elif path == "/dashboard/suggest":
+                # The raw form as well as the flattened fields: the approval
+                # checklist submits one "key" per ticked proposal, and
+                # `fields` keeps only the last value of a repeated name.
+                response = await self._suggest_action(
+                    fields, form, principal, request
+                )
             else:
                 response = await self._tags_action(fields, principal, request)
         except Exception:
@@ -396,6 +417,61 @@ class DashboardApp:
             "sweep_start" if started else "sweep_busy",
             self._client_label(request),
         )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _suggest_action(
+        self,
+        fields: dict,
+        form: FormData,
+        principal: _Principal,
+        request: Request,
+    ) -> Response:
+        """Propose scopes from this user's memories, then register what they
+        ticked.
+
+        Two actions, deliberately two POSTs. ``run`` starts a background pass
+        that reads a sample of the store and asks for candidate categories —
+        it writes nothing. ``confirm`` registers only the proposals whose keys
+        came back ticked, as the user's OWN scopes; a scope key is the
+        identity a later consent grant is written against, so nothing enters
+        the vocabulary without the user putting it there.
+
+        Confirming resolves the ticked keys against the proposals the server
+        is holding rather than trusting names posted back by the browser, and
+        skips any that now collide with a registered scope (registration
+        upserts, so a collision would overwrite someone's description with a
+        model's).
+        """
+        action = fields.get("action") or ""
+        runner = get_suggestion_runner()
+        if action == "run":
+            if not classifier_enabled():
+                return PlainTextResponse(
+                    "Suggesting scopes needs the model this server has switched "
+                    "off: it only runs when EXTRACTION_MODE=anthropic, so no "
+                    "memory of yours is sent anywhere. You can still create "
+                    "scopes yourself.",
+                    status_code=409,
+                )
+            started = runner.start(self.store, self._registry(), principal.user_id)
+            logged = "suggest_run" if started else "suggest_busy"
+        elif action == "confirm":
+            ticked = [v for v in form.getlist("key") if isinstance(v, str)]
+            approved = runner.take(principal.user_id, ticked)
+            registered = await run_in_threadpool(
+                register_proposals,
+                self._registry(),
+                principal.user_id,
+                approved,
+            )
+            logger.info(
+                "registered %d suggested scope(s) for user=%s",
+                len(registered), principal.user_id,
+            )
+            logged = "suggest_confirm"
+        else:
+            return PlainTextResponse("unknown suggestion action", status_code=400)
+        log_dashboard_action(principal.user_id, logged, self._client_label(request))
         return RedirectResponse(_BACK_TO_PAGE, status_code=303)
 
     @staticmethod
