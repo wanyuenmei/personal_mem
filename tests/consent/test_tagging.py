@@ -16,12 +16,18 @@ from context_layer.consent import (
     PROVENANCE_LLM_CLEARED,
     PROVENANCE_USER,
     PROVENANCE_USER_REMOVED,
+    ClassificationFailed,
     ConsentScope,
     ScopeRegistry,
     tag_updates,
     tagging,
 )
-from context_layer.consent.tagging import SweepRunner, tag_new_memories, tag_rows
+from context_layer.consent.tagging import (
+    SWEEP_ERROR_ALL_FAILED,
+    SweepRunner,
+    tag_new_memories,
+    tag_rows,
+)
 
 _DIETARY = ConsentScope(
     key="dietary__tastebuds",
@@ -63,6 +69,18 @@ def stub_classify(monkeypatch):
         monkeypatch.setattr(tagging, "classify", lambda text, scopes: list(keys))
 
     return install
+
+
+def _raising_classify(fails_on, keys=(_TRAVEL.key,)):
+    """A classifier that fails for the given memory texts and picks ``keys``
+    for the rest — how a bad API key or a rate limit looks from tag_rows."""
+
+    def classify(text, scopes):
+        if text in fails_on:
+            raise ClassificationFailed("the scope classifier call failed")
+        return list(keys)
+
+    return classify
 
 
 def _wait_for(predicate, timeout=5.0):
@@ -139,9 +157,9 @@ def test_tag_rows_writes_through_the_tenant_guarded_primitive(stub_classify):
     stub_classify(["travel__user"])
     store = _FakeStore()
 
-    changed = tag_rows(store, "u1", _SCOPES, [{"id": "m1", "memory": "went to Rome"}])
+    counts = tag_rows(store, "u1", _SCOPES, [{"id": "m1", "memory": "went to Rome"}])
 
-    assert changed == 1
+    assert (counts.changed, counts.failed) == (1, 0)
     assert store.updates == [("m1", {"cs_travel__user": PROVENANCE_LLM}, "u1")]
 
 
@@ -159,12 +177,12 @@ def test_one_memorys_failure_does_not_abandon_the_rest(stub_classify, caplog):
 
     store.update_metadata = flaky
 
-    changed = tag_rows(
+    counts = tag_rows(
         store, "u1", _SCOPES,
         [{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}],
     )
 
-    assert changed == 1
+    assert (counts.changed, counts.failed) == (1, 1)
     assert [call[0] for call in store.updates] == ["m2"]
 
 
@@ -172,12 +190,38 @@ def test_rows_without_text_or_id_are_skipped(stub_classify):
     stub_classify(["travel__user"])
     store = _FakeStore()
 
-    changed = tag_rows(
+    counts = tag_rows(
         store, "u1", _SCOPES, [{"id": "m1", "memory": ""}, {"id": "", "memory": "x"}]
     )
 
-    assert changed == 0
+    assert (counts.changed, counts.failed) == (0, 0)
     assert store.updates == []
+
+
+def test_a_failed_classification_is_counted_not_read_as_no_scopes(monkeypatch):
+    """The bug this replaces: the classifier returned `[]` for a failed call
+    as well as for "nothing applies", so a broken one counted as a clean
+    pass over every memory."""
+    monkeypatch.setattr(tagging, "classify", _raising_classify({"a"}))
+    store = _FakeStore()
+
+    counts = tag_rows(store, "u1", _SCOPES, [{"id": "m1", "memory": "a"}])
+
+    assert (counts.changed, counts.failed) == (0, 1)
+    assert store.updates == []
+
+
+def test_a_failed_classification_does_not_abandon_the_rest(monkeypatch):
+    monkeypatch.setattr(tagging, "classify", _raising_classify({"a"}))
+    store = _FakeStore()
+
+    counts = tag_rows(
+        store, "u1", _SCOPES,
+        [{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}],
+    )
+
+    assert (counts.changed, counts.failed) == (1, 1)
+    assert [call[0] for call in store.updates] == ["m2"]
 
 
 # --- the user-triggered sweep --------------------------------------------
@@ -271,6 +315,40 @@ def test_an_empty_registry_is_distinguishable_from_a_pass_that_matched_nothing(
     assert (matched_nothing.total, matched_nothing.changed) == (0, 0)
     assert empty_registry.scope_count == 0
     assert matched_nothing.scope_count == 1
+
+
+def test_a_sweep_that_classifies_nothing_does_not_report_success(
+    registry, monkeypatch
+):
+    """A missing key, an auth failure or a retired model used to finish as
+    "done, 0 of N updated" — indistinguishable from a store where nothing
+    needed tagging. It is now an error the dashboard can explain."""
+    monkeypatch.setattr(tagging, "classify", _raising_classify({"a", "b"}))
+    store = _FakeStore([{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}])
+    runner = SweepRunner()
+
+    runner.start(store, registry, "u1")
+    assert _wait_for(lambda: runner.status("u1").state == "error")
+
+    status = runner.status("u1")
+    assert status.error == SWEEP_ERROR_ALL_FAILED
+    assert (status.total, status.changed, status.failed) == (2, 0, 2)
+    assert status.finished_at
+
+
+def test_a_partly_failing_sweep_still_reports_what_succeeded(registry, monkeypatch):
+    monkeypatch.setattr(
+        tagging, "classify", _raising_classify({"a"}, keys=[registry.all("u1")[0].key])
+    )
+    store = _FakeStore([{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}])
+    runner = SweepRunner()
+
+    runner.start(store, registry, "u1")
+    assert _wait_for(lambda: runner.status("u1").state == "done")
+
+    status = runner.status("u1")
+    assert (status.processed, status.changed, status.failed) == (2, 1, 1)
+    assert status.error == ""
 
 
 def test_a_failing_sweep_reports_error_not_a_stuck_running(registry, monkeypatch):
@@ -367,6 +445,25 @@ def test_on_write_tagging_never_raises_into_the_write_path(registry, monkeypatch
     )
     if thread is not None:
         thread.join(timeout=5)
+
+
+def test_a_failed_classification_never_raises_into_the_write_path(
+    registry, monkeypatch
+):
+    """`classify` raising is the whole point of this change, and the on-write
+    pass is the one caller that must still swallow it: the memory is already
+    saved, and a broken classifier leaves it untagged for the next sweep."""
+    monkeypatch.setattr(tagging, "classifier_enabled", lambda: True)
+    monkeypatch.setattr(tagging, "classify", _raising_classify({"x"}))
+    store = _FakeStore([{"id": "m1", "memory": "x"}])
+
+    thread = tag_new_memories(
+        store, "u1", {"results": [{"id": "m1", "event": "ADD"}]}, registry=registry
+    )
+    assert thread is not None
+    thread.join(timeout=5)
+
+    assert store.updates == []
 
 
 def test_a_malformed_add_result_is_survivable(registry, monkeypatch):

@@ -815,6 +815,32 @@ def test_page_points_at_scope_creation_when_none_are_registered(
     assert "Nothing to tag into yet" in resp.text
 
 
+def test_page_renders_a_sweep_that_could_not_classify_anything(
+    capability_app, monkeypatch, tagging_on
+):
+    """A sweep where every classification call failed must reach the page as
+    an error with a count, not as "0 of 4 memories updated"."""
+    _install_runner(
+        monkeypatch,
+        _FakeRunner(
+            status=SweepStatus(
+                state="error",
+                total=4,
+                processed=4,
+                failed=4,
+                # The exact value renderSweep branches on to explain the
+                # likely cause (credentials or model config) to the user.
+                error="all_failed",
+            )
+        ),
+    )
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["sweep"]["state"] == "error"
+    assert (data["sweep"]["failed"], data["sweep"]["error"]) == (4, "all_failed")
+
+
 def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch):
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
     _install_runner(monkeypatch, _FakeRunner())

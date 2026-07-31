@@ -312,9 +312,19 @@ _PAGE = """<!doctype html>
         "it again now that you have some.";
     } else if (s.state === "done") {
       note.textContent = "Last run: " + s.changed + " of " + s.total +
-        " memories updated \\u00b7 " + fmt(s.finished_at);
+        " memories updated" +
+        (s.failed ? " \\u00b7 " + s.failed + " could not be tagged " +
+          "(see the server logs)" : "") +
+        " \\u00b7 " + fmt(s.finished_at);
     } else if (s.state === "error") {
-      note.textContent = "Last run failed (" + s.error + "). Try again.";
+      // all_failed is every memory failing on its own rather than the sweep
+      // itself blowing up, so it gets the actionable copy instead of an
+      // exception name that means nothing to the person reading it.
+      note.textContent = s.error === "all_failed"
+        ? "Last run could not tag any of your " + s.total + " memories. That " +
+          "usually means this server can't reach the model \\u2014 check its " +
+          "API key and model settings, then the server logs for the error."
+        : "Last run failed (" + s.error + "). Try again.";
     } else {
       note.textContent = "Tags are derived from your memories \\u2014 re-run " +
         "this after adding or changing scopes.";

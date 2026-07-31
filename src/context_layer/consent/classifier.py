@@ -17,10 +17,14 @@ network call happens at all and every memory classifies as "no scopes" —
 manual tagging from the dashboard still works, and the dashboard says so
 rather than leaving the user wondering why the sweep button does nothing.
 
-Every failure path returns "no scopes" instead of raising: an API error, a
-reply that isn't JSON, or keys outside the vocabulary. Callers run on
-background threads behind a write or a page POST, so a classifier problem
-must degrade to "untagged", never to a failed write.
+An unusable *reply* — not JSON, not a list, keys outside the vocabulary — is
+still "no scopes": the model answered, we just couldn't use the answer. A
+failed *call* is not, and raises :class:`ClassificationFailed`, because a
+missing API key or a retired model is a configuration problem the user has to
+hear about rather than a store where nothing happens to be classifiable
+(VC-91). Callers still run on background threads behind a write or a page
+POST and must keep degrading to "untagged" — they catch this per memory,
+count it, and report it — never to a failed write.
 """
 
 import json
@@ -43,6 +47,17 @@ _MAX_TOKENS = 256
 
 # Strips a ```json … ``` fence, which models add even when told not to.
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
+
+
+class ClassificationFailed(RuntimeError):
+    """The classifier could not answer: the call itself failed.
+
+    An exception rather than a sentinel return value, because ``[]`` already
+    means "no scopes apply" and a sentinel would be silently mistaken for it
+    by any caller that forgot to check — which is the exact failure this
+    replaces, where a missing API key rendered as a successful sweep tagging
+    nothing. A caller that forgets to handle an exception is loud instead.
+    """
 
 
 def classifier_enabled() -> bool:
@@ -127,9 +142,11 @@ def _parse(raw: str, valid_keys: set[str]) -> list[str]:
 def classify(text: str, scopes: Sequence[ConsentScope]) -> list[str]:
     """The scope keys that apply to ``text``, drawn from ``scopes``.
 
-    Returns ``[]`` — with no network call — when classification is disabled,
-    when there is nothing to classify, or when no scopes are registered. Any
-    error or unusable reply also returns ``[]``.
+    Returns ``[]`` — "no scopes apply" — when classification is disabled,
+    when there is nothing to classify or no scopes are registered (none of
+    which make a network call), and when the model's reply is unusable.
+    Raises :class:`ClassificationFailed` when the call itself fails, so a
+    caller can tell "nothing applies" from "we never got an answer".
     """
     if not classifier_enabled():
         return []
@@ -155,8 +172,11 @@ def classify(text: str, scopes: Sequence[ConsentScope]) -> list[str]:
             for block in resp.content
             if getattr(block, "type", None) == "text"
         )
-    except Exception:
-        logger.exception("scope classification failed; leaving the memory untagged")
-        return []
+    except Exception as exc:
+        # Not logged here: the caller logs with the memory id, which is more
+        # use than a bare traceback, and ``from exc`` carries this one along.
+        raise ClassificationFailed(
+            f"the scope classifier call failed: {type(exc).__name__}"
+        ) from exc
 
     return _parse(raw, {scope.key for scope in scopes})

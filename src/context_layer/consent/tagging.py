@@ -38,6 +38,12 @@ from context_layer.consent.tags import (
 
 logger = logging.getLogger("context_layer.consent.tagging")
 
+# SweepStatus.error when every memory in a sweep failed on its own — the one
+# failure mode with a user-facing explanation rather than an exception type
+# name, because it is nearly always credentials or model configuration. The
+# dashboard branches on this exact value to render that explanation.
+SWEEP_ERROR_ALL_FAILED = "all_failed"
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -82,6 +88,21 @@ def tag_updates(
     return updates
 
 
+@dataclass(frozen=True)
+class TagCounts:
+    """How one pass over a batch of rows went.
+
+    ``failed`` counts memories that could not be tagged at all, whatever the
+    reason — the classifier call failed, or the write did. Both land in the
+    same place from the user's side ("this memory didn't get tagged"), and
+    both belong in the count that stops a sweep reading as a clean success.
+    A row with no id or no text is neither: there was nothing to do.
+    """
+
+    changed: int = 0
+    failed: int = 0
+
+
 def tag_rows(
     store,
     user_id: str,
@@ -89,14 +110,15 @@ def tag_rows(
     rows: Sequence[dict],
     *,
     on_progress: Optional[Callable[[], None]] = None,
-) -> int:
-    """Classify and tag each row; returns how many memories were changed.
+) -> TagCounts:
+    """Classify and tag each row; returns what changed and what failed.
 
-    One memory's failure — a classifier error that escaped, a write that lost
-    a race with a delete — is logged and skipped rather than abandoning the
-    rest of the sweep.
+    One memory's failure — a classification call that failed, a write that
+    lost a race with a delete — is logged and counted rather than abandoning
+    the rest of the sweep.
     """
     changed = 0
+    failed = 0
     for row in rows:
         memory_id = str(row.get("id") or "")
         text = str(row.get("memory") or row.get("text") or "")
@@ -107,10 +129,11 @@ def tag_rows(
                     store.update_metadata(memory_id, updates, user_id)
                     changed += 1
         except Exception:
+            failed += 1
             logger.exception("failed to tag memory %r for user=%s", memory_id, user_id)
         if on_progress is not None:
             on_progress()
-    return changed
+    return TagCounts(changed=changed, failed=failed)
 
 
 # --- the user-triggered full sweep ----------------------------------------
@@ -124,6 +147,12 @@ class SweepStatus:
     in THIS worker, and a restart genuinely has no sweep running. Losing it
     costs nothing — the sweep is re-runnable at will and converges to the same
     tags.
+
+    ``error`` carries either the exception type that ended the whole sweep or
+    ``SWEEP_ERROR_ALL_FAILED`` when every memory failed individually. The
+    second is why ``failed`` exists: a sweep where every classification call
+    was rejected used to finish as "done, 0 of N updated", indistinguishable
+    from a store where nothing needed tagging.
     """
 
     state: str = "idle"  # idle | running | done | error
@@ -137,6 +166,7 @@ class SweepStatus:
     total: int = 0
     processed: int = 0
     changed: int = 0
+    failed: int = 0
     started_at: str = ""
     finished_at: str = ""
     error: str = ""
@@ -205,15 +235,23 @@ class SweepRunner:
             scopes = registry.all(user_id)
             rows = store.all(user_id) if scopes else []
             self._update(user_id, scope_count=len(scopes), total=len(rows))
-            changed = tag_rows(
+            counts = tag_rows(
                 store,
                 user_id,
                 scopes,
                 rows,
                 on_progress=lambda: self._bump_processed(user_id),
             )
+            # Every memory failing is a broken classifier, not a sweep with
+            # nothing to do; anything less still reports what did land.
+            everything_failed = bool(rows) and counts.failed == len(rows)
             self._update(
-                user_id, state="done", changed=changed, finished_at=_now()
+                user_id,
+                state="error" if everything_failed else "done",
+                changed=counts.changed,
+                failed=counts.failed,
+                error=SWEEP_ERROR_ALL_FAILED if everything_failed else "",
+                finished_at=_now(),
             )
         except Exception as exc:
             logger.exception("scope sweep failed for user=%s", user_id)
