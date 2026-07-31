@@ -2,7 +2,7 @@ name: PR title
 
 # Enforces the repo PR-title convention documented in CLAUDE.md and
 # .github/pull_request_template.md:  "<ticket>: <short description>"
-# e.g. "PER-7: add tests and tool error handling".
+# e.g. "VC-86: add the consent-scope registry and register_scopes tool".
 #
 # "fix: <short description>" is also accepted, for small corrections that don't
 # warrant their own Linear issue.
@@ -31,6 +31,6 @@ jobs:
           if echo "$TITLE" | grep -Eq '^([A-Z][A-Z0-9]*-[0-9]+|fix): .+'; then
             echo "OK: title matches '<ticket>: <short description>' or 'fix: <short description>'."
           else
-            echo "::error::PR title must be '<ticket>: <short description>' — a Linear id, a colon, a space, then a description. e.g. 'PER-7: add tests and tool error handling'. Small corrections may use 'fix: <short description>'. Got: '$TITLE'"
+            echo "::error::PR title must be '<ticket>: <short description>' — a Linear id, a colon, a space, then a description. e.g. 'VC-86: add the consent-scope registry and register_scopes tool'. Small corrections may use 'fix: <short description>'. Got: '$TITLE'"
             exit 1
           fi

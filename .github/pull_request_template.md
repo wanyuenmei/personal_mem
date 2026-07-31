@@ -3,9 +3,9 @@ PR TITLE convention (GitHub can't enforce title shape from a template, so keep t
 
     <ticket>: <short description>
 
-e.g.  PER-7: add tests, tool error handling, and access-log scope/timestamp
+e.g.  VC-86: add the consent-scope registry and register_scopes tool
 
-The <ticket> is the Linear issue id (PER-N). Fill in the sections below,
+The <ticket> is the Linear issue id (VC-N). Fill in the sections below,
 then delete this comment.
 
 For a small correction that doesn't warrant its own Linear issue, use
@@ -17,7 +17,7 @@ and delete the ## Ticket section. Every other section is still required.
 
 ## Ticket
 <!-- Link to the Linear issue this PR implements, e.g.
-     https://linear.app/personal-context-mcp/issue/PER-7
+     https://linear.app/personal-context-mcp/issue/VC-86
      Delete this section entirely for a "fix: ..." PR. -->
 
 ## Description
