@@ -133,7 +133,7 @@ Each conversation is fed through mem0 extraction. A full import is the most expe
 
 For the full request path — transport → auth guards → tools → identity seam → memory store → mem0 → vector store — see [`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes `GET /health` (200, no auth) for liveness/readiness probes.
 
-- **Categories:** memories carry no category tag today. The consent layer will define the vocabulary and classify into it out of band; mem0 keeps the fact text and its embedding, so categories stay derivable whenever a grant needs them.
+- **Categories:** the vocabulary now exists, per party rather than global: each third party registers the consent scopes it cares about via the `register_scopes` tool, into a per-user registry (identity is self-asserted until VC-65, so registering grants nothing — it only declares categories the user can see and tag against). Memories still carry no tags yet: tagging (VC-87) and out-of-band classification (VC-88) build on this registry, and mem0 keeps the fact text and its embedding, so categories stay derivable whenever a grant needs them.
 - **Audit trail:** every tool call emits one line of JSON — tool, resolved tenant, calling client, timestamp — so a deploy's logs can be filtered by any of them. Under OAuth the client is named from its `User-Agent`, because the token identifies the person rather than the app (PER-65). It's structured logging, not yet a queryable audit datastore.
 - **Deletion:** the store has tenant-safe `delete` and `delete_all` primitives, each refusing to act without a valid tenant id. Neither is exposed as an MCP tool yet (PER-57) — they're the foundation the erasure work builds on.
 - **Trust model:** run it fully local (`none` mode: nothing leaves your machine), or self-host the deploy. The hosted instance is a custodian, not an owner — export and delete at any time.
@@ -201,9 +201,10 @@ src/context_layer/
   config.py             # env-driven settings: extraction modes, stores, embedders, transport
   transport/            # stdio + streamable-HTTP assembly; /health endpoint
   auth/                 # WorkOS OAuth resource server; capability-path + rate-limit guards
-  tools/                # the MCP tools: search_memory / add_memory
+  tools/                # the MCP tools: search_memory / add_memory / register_scopes
   identity/             # resolve_user_id — the tenant seam
   memory/               # ContextStore over mem0: add/search/all/delete/delete_all
+  consent/              # per-user consent-scope registry (SQLite local / Postgres deploy)
   dashboard/            # read-only memory browser at /dashboard (AuthKit sign-in on OAuth deploys)
   observability/        # access/audit log — one JSON line per tool call or page view
   ingest/               # offline backfill: export parsers → normalized format → batch runner
