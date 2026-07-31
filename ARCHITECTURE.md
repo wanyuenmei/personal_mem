@@ -14,8 +14,9 @@ flowchart LR
     transport["transport/<br/>stdio · streamable-http · /health"] --> guards
     guards["auth/<br/>WorkOS OAuth verifier (deploy)<br/>· CapabilityPathGuard · RateLimitGuard"] --> tools
     guards --> dash
-    tools["tools/<br/>search_memory · add_memory"] --> identity
+    tools["tools/<br/>search_memory · add_memory · register_scopes"] --> identity
     tools --> store
+    tools --> consent["consent/<br/>ScopeRegistry"]
     tools --> obs["observability/<br/>access log"]
     dash["dashboard/<br/>read-only memory browser"] --> store
     dash --> obs
@@ -24,6 +25,7 @@ flowchart LR
   end
 
   mem0 --> vs["vector store<br/>Chroma (local) / pgvector (deploy)"]
+  consent --> regdb["scope registry<br/>SQLite (local) / Postgres (deploy)"]
   app_py["app.py — composition root"] -.builds.-> app
   config["config.py — settings"] -.reads env.-> app
 ```
@@ -35,9 +37,10 @@ flowchart LR
 | Composition root | `app.py`, `__main__.py` | Build the server, pick the transport, run | the service's `main()` |
 | Transport | `transport/` | stdio / streamable-http assembly + `/health` | the network edge / API gateway |
 | Auth | `auth/` | WorkOS OAuth token verifier, capability-path + rate-limit guards | an auth/gateway service |
-| Tools | `tools/` | the MCP tools (`search_memory`, `add_memory`) | the MCP-facing service |
+| Tools | `tools/` | the MCP tools (`search_memory`, `add_memory`, `register_scopes`) | the MCP-facing service |
 | Identity | `identity/` | `resolve_user_id` — the single tenant-isolation seam | shared client of an auth service |
 | Memory | `memory/` | `ContextStore` over mem0: `add`/`search`/`all`/`delete`/`delete_all`, each behind the tenant guard | the **memory service** |
+| Consent | `consent/` | `ScopeRegistry` — the per-user vocabulary of consent scopes, per owning party; SQLite locally, the deploy's Postgres under pgvector | the **consent service** |
 | Dashboard | `dashboard/` | the read-only memory browser at `/dashboard`: AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
 | Ingest | `ingest/` | offline backfill: export parsers → normalized format → mem0 extraction | a batch import worker |
 | Observability | `observability/` | one line of JSON per tool call: tool, tenant, client, timestamp | ships to a log/metrics sink |

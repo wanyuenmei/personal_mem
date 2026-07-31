@@ -20,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 
 from context_layer.auth import build_fastmcp_auth_kwargs
 from context_layer.config import MCP_HOST, MCP_PORT, MCP_TRANSPORT
-from context_layer.tools import register_memory_tools
+from context_layer.tools import register_consent_tools, register_memory_tools
 from context_layer.transport import run_http
 
 _INSTRUCTIONS = (
@@ -44,6 +44,7 @@ def build_mcp() -> FastMCP:
         **build_fastmcp_auth_kwargs(),
     )
     register_memory_tools(mcp)
+    register_consent_tools(mcp)
     return mcp
 
 
