@@ -19,6 +19,13 @@ Provenance values:
   user vetoed (a deleted key would just get re-added on the next sweep), and
   mem0's ``update`` merges metadata into the existing payload — keys can be
   set but never removed through it. Reads as untagged everywhere.
+- ``llm_cleared`` — the classifier retracted its own earlier ``llm`` tag on a
+  re-sweep. Needed for the same reason ``user_removed`` is a tombstone: an
+  ``llm`` tag has to be able to stop applying when the vocabulary or the
+  memory's reading of it changes, and the key cannot be deleted. Distinct
+  from ``user_removed`` because it carries no user intent — a later sweep may
+  set it back to ``llm`` freely, whereas ``user_removed`` is permanent until
+  the user re-adds the tag themselves. Reads as untagged.
 """
 
 from typing import Optional
@@ -28,6 +35,12 @@ TAG_PREFIX = "cs_"
 PROVENANCE_USER = "user"
 PROVENANCE_LLM = "llm"
 PROVENANCE_USER_REMOVED = "user_removed"
+PROVENANCE_LLM_CLEARED = "llm_cleared"
+
+# Provenance values the user owns. The classifier reads these and writes
+# neither: a manual tag survives every re-sweep, and a user_removed tombstone
+# is never overwritten back to llm.
+USER_OWNED_PROVENANCES = (PROVENANCE_USER, PROVENANCE_USER_REMOVED)
 
 # The provenance values under which a tag counts as "this memory carries this
 # scope". Anything else — the user_removed tombstone, or a malformed value a

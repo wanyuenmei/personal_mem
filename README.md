@@ -63,6 +63,8 @@ A local stdio setup has no HTTP surface; use `uv run python scripts/inspect_db.p
 
 The page reads memories and writes only consent state (scopes and tags). Editing or deleting the memories themselves from the browser is tracked as PER-56 and PER-41.
 
+**Re-tag all memories** runs the scope classifier over your whole store in the background and reports progress as you reload; run it after registering or creating scopes, since tags are derived from your memory text and a brand-new scope starts out matching nothing. Tags you set by hand are never overwritten by it, and a tag you removed is never re-applied. The button appears only under `EXTRACTION_MODE=anthropic` — that is the one mode where classification happens at all, and the panel says so otherwise.
+
 ## Steer your AI client
 
 Connecting the MCP server is not enough on its own. Every client we've tried also has its own native memory, and left to its own devices it will keep relying on that instead of calling out to this store. The tool descriptions on `search_memory`/`add_memory` nudge the model in that direction, but the reliable fix is to also add a couple of lines to that client's own **custom/general instructions** (the persistent system-prompt-style settings field every major client exposes), telling it to:
@@ -91,11 +93,11 @@ Set `EXTRACTION_MODE` in `.env`:
 
 | mode        | what happens on write                              | data leaves machine? |
 |-------------|----------------------------------------------------|----------------------|
-| `anthropic` | Claude extracts & dedups facts (needs API key in `~/.env`) | yes (extraction only)|
+| `anthropic` | Claude extracts & dedups facts (needs API key in `~/.env`) | yes (extraction, and scope classification) |
 | `ollama`    | a local LLM extracts facts (needs ollama running)  | no                   |
 | `none`      | raw text stored + embedded, no LLM                 | no                   |
 
-Embeddings always run **locally** (fastembed, 384-dim), so retrieval never depends on a cloud provider.
+Embeddings always run **locally** (fastembed, 384-dim), so retrieval never depends on a cloud provider. The consent-scope classifier follows the same switch: only `anthropic` sends memory text to a model to derive tags, and in the other two modes it never runs, so tagging is by hand.
 
 ## Backfill your history
 
@@ -133,7 +135,7 @@ Each conversation is fed through mem0 extraction. A full import is the most expe
 
 For the full request path — transport → auth guards → tools → identity seam → memory store → mem0 → vector store — see [`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes `GET /health` (200, no auth) for liveness/readiness probes.
 
-- **Categories:** the vocabulary exists per party rather than global: each third party registers the consent scopes it cares about via the `register_scopes` tool, into a per-user registry (identity is self-asserted until VC-65, so registering grants nothing — it only declares categories the user can see and tag against). Memories carry their tags as one `cs_<scope-key>` metadata key per scope with a provenance value (`user` tags survive re-sweeps, `llm` tags are rebuildable, `user_removed` is a veto the classifier must respect), managed from the dashboard; out-of-band classification (VC-88) builds on the same keys, and mem0 keeps the fact text and its embedding, so `llm` tags stay derivable whenever a grant needs them.
+- **Categories:** the vocabulary exists per party rather than global: each third party registers the consent scopes it cares about via the `register_scopes` tool, into a per-user registry (identity is self-asserted until VC-65, so registering grants nothing — it only declares categories the user can see and tag against). Memories carry their tags as one `cs_<scope-key>` metadata key per scope with a provenance value (`user` tags survive re-sweeps, `llm` tags are rebuildable, `user_removed` is a veto the classifier must respect), set by hand from the dashboard or derived by the scope classifier. That classifier runs strictly out of band — a daemon thread after a write, or the dashboard's re-tag sweep — so no read or write ever waits on it and a classifier failure leaves a memory untagged rather than failing the save. Since mem0 keeps the fact text and its embedding, `llm` tags stay derivable and the sweep can rebuild them whenever the vocabulary changes.
 - **Audit trail:** every tool call emits one line of JSON — tool, resolved tenant, calling client, timestamp — so a deploy's logs can be filtered by any of them. Under OAuth the client is named from its `User-Agent`, because the token identifies the person rather than the app (PER-65). It's structured logging, not yet a queryable audit datastore.
 - **Deletion:** the store has tenant-safe `delete` and `delete_all` primitives, each refusing to act without a valid tenant id. Neither is exposed as an MCP tool yet (PER-57) — they're the foundation the erasure work builds on.
 - **Trust model:** run it fully local (`none` mode: nothing leaves your machine), or self-host the deploy. The hosted instance is a custodian, not an owner — export and delete at any time.
@@ -204,7 +206,7 @@ src/context_layer/
   tools/                # the MCP tools: search_memory / add_memory / register_scopes
   identity/             # resolve_user_id — the tenant seam
   memory/               # ContextStore over mem0: add/search/all/update_metadata/delete/delete_all
-  consent/              # per-user consent-scope registry + the cs_* tag vocabulary
+  consent/              # per-user consent-scope registry, the cs_* tag vocabulary, and the out-of-band classifier
   dashboard/            # memory browser + scope/tag manager at /dashboard (AuthKit sign-in on OAuth deploys)
   observability/        # access/audit log — one JSON line per tool call or page view
   ingest/               # offline backfill: export parsers → normalized format → batch runner
@@ -239,6 +241,6 @@ uv pip install -e ~/repos/mem0   # re-run `uv sync` to go back to the pinned rel
 
 ## Roadmap
 
-Working today: the memory store with its tenant-isolation guard, the MCP tools, both auth modes, the access log, the memory browser at `/dashboard` with consent-scope and tag management, and backfill from a Claude export.
+Working today: the memory store with its tenant-isolation guard, the MCP tools, both auth modes, the access log, the memory browser at `/dashboard` with consent-scope and tag management, the out-of-band scope classifier behind it, and backfill from a Claude export.
 
 Next: retire the capability URL now that OAuth carries real traffic (PER-22) and onboard the first friend tenants (PER-23); tenant hygiene — a per-user export endpoint (PER-24), deletion exposed over MCP (PER-57), an erasure receipt (PER-25); a ChatGPT export parser (PER-28) and an idempotent ingest manifest so re-running an import is safe (PER-29); reconciliation, so a changed preference supersedes its old version instead of overwriting it (PER-32, PER-33); then the consent layer — scoped grants, revocation, deletion propagation (PER-16). Details and status live in the Linear project.
