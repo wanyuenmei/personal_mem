@@ -282,6 +282,15 @@ _PAGE = """<!doctype html>
       el.appendChild(note);
       return;
     }
+    // Tags ARE scopes, so with none registered the button's only possible
+    // outcome is a no-op. Lead with the step that unblocks it instead. Worded
+    // to not simply echo the empty-scopes line renderScopes just put above.
+    if (!scopes.length) {
+      note.textContent = "Nothing to tag into yet \\u2014 create a scope first, " +
+        "then come back and re-tag your memories.";
+      el.appendChild(note);
+      return;
+    }
     const s = data.sweep || {};
     const running = s.state === "running";
     const form = postForm("sweep", {});
@@ -296,6 +305,11 @@ _PAGE = """<!doctype html>
         ? "Classifying " + s.processed + " of " + s.total + "\\u2026"
         : "Starting\\u2026";
       setTimeout(() => location.reload(), 3000);
+    } else if (s.state === "done" && !s.scope_count) {
+      // Scopes exist now (checked above) but didn't when that run happened,
+      // so the stored "0 of 0" describes an empty vocabulary, not a no-op.
+      note.textContent = "The last run had no scopes to tag into \\u2014 run " +
+        "it again now that you have some.";
     } else if (s.state === "done") {
       note.textContent = "Last run: " + s.changed + " of " + s.total +
         " memories updated \\u00b7 " + fmt(s.finished_at);
