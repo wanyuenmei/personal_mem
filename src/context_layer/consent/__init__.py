@@ -10,7 +10,11 @@ Tags are assigned by hand from the dashboard or derived by the ``classifier``
 and written by ``tagging``, which keeps that work off every hot path (VC-88).
 """
 
-from context_layer.consent.classifier import classifier_enabled, classify
+from context_layer.consent.classifier import (
+    ClassificationFailed,
+    classifier_enabled,
+    classify,
+)
 from context_layer.consent.registry import (
     DESCRIPTION_MAX_CHARS,
     RESERVED_OWNER_SLUG,
@@ -42,6 +46,7 @@ __all__ = [
     "PROVENANCE_USER_REMOVED",
     "RESERVED_OWNER_SLUG",
     "SLUG_MAX_CHARS",
+    "ClassificationFailed",
     "ConsentScope",
     "ScopeRegistry",
     "SweepStatus",

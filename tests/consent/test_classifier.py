@@ -9,7 +9,12 @@ import anthropic
 import pytest
 
 from context_layer import config
-from context_layer.consent import ConsentScope, classifier_enabled, classify
+from context_layer.consent import (
+    ClassificationFailed,
+    ConsentScope,
+    classifier_enabled,
+    classify,
+)
 from context_layer.consent.classifier import vocabulary_lines
 
 _SCOPES = [
@@ -169,10 +174,25 @@ def test_json_that_is_not_a_list_falls_back_to_untagged(anthropic_reply):
     assert classify("x", _SCOPES) == []
 
 
-def test_api_error_falls_back_to_untagged(anthropic_reply):
+def test_a_failed_call_is_raised_rather_than_read_as_no_scopes(anthropic_reply):
+    """`[]` is a real answer ("nothing applies"), so a call that never got an
+    answer must not be able to give it — otherwise a missing key, an auth
+    failure or a retired model all render as a sweep that tagged nothing."""
     anthropic_reply(RuntimeError("upstream is down"))
 
-    assert classify("x", _SCOPES) == []
+    with pytest.raises(ClassificationFailed):
+        classify("x", _SCOPES)
+
+
+def test_a_failed_call_keeps_the_underlying_error_for_the_logs(anthropic_reply):
+    """The caller logs this, and "which memory failed how" is only useful with
+    the original error attached."""
+    anthropic_reply(RuntimeError("upstream is down"))
+
+    with pytest.raises(ClassificationFailed) as excinfo:
+        classify("x", _SCOPES)
+
+    assert str(excinfo.value.__cause__) == "upstream is down"
 
 
 def test_empty_text_and_empty_vocabulary_make_no_call(anthropic_reply):
