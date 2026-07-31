@@ -1,11 +1,11 @@
 """Thin wrapper around mem0 so the rest of the app never touches mem0 directly.
 
-Memories carry no category tag. Scope tagging was removed (PER-63) until the
-consent layer defines a vocabulary: nothing read the tag, and mem0 keeps the
-fact text and its embedding, so categories stay derivable whenever a grant
-actually needs them. Treat that future label like an embedding — computed from
-the text, rebuildable, never the source of truth — and materialize it out of
-band rather than on this write path.
+Memories are written untagged: the add path stamps no category label (PER-63
+removed the old one), and consent-scope tags arrive later, out of band, as
+metadata merged in through `update_metadata` — one ``cs_<scope-key>`` payload
+key per scope, written by the dashboard (VC-87) and eventually the classifier
+(VC-88). See context_layer.consent.tags for the key/provenance shape and why
+it is one scalar key per scope rather than an array.
 
 --- Tenant isolation (PER-5) --------------------------------------------------
 Isolation currently rests entirely on passing `filters={"user_id": ...}` (or
@@ -73,6 +73,16 @@ try:
     FastEmbedEmbedding.embed = _embed_as_list  # type: ignore[method-assign]
 except ImportError:  # fastembed not installed (huggingface-only env)
     pass
+
+
+# Payload keys update_metadata refuses to touch: the tenant filter itself
+# (user_id — overwriting it would re-home the memory to another tenant, the
+# exact move the isolation guard exists to prevent), mem0's other identity
+# fields, and the core fields mem0 derives from the text on every update.
+_PROTECTED_METADATA_KEYS = frozenset(
+    {"user_id", "agent_id", "run_id", "actor_id", "role",
+     "id", "data", "hash", "created_at", "updated_at"}
+)
 
 
 def _as_results(res: object) -> list[dict]:
@@ -171,6 +181,60 @@ class ContextStore:
             )
         self._mem.delete(memory_id)
         return {"deleted": True, "id": memory_id}
+
+    def update_metadata(
+        self, memory_id: str, updates: dict, user_id: Optional[str] = None
+    ) -> dict:
+        """Merge `updates` into a memory's metadata — only if it belongs to
+        `user_id`. Same fetch-first owner check as `delete`, because mem0's own
+        `update(memory_id, metadata=...)` takes no user filter either.
+
+        MERGE, not replace: mem0's `_update_memory` copies the existing payload
+        and `dict.update`s the given metadata into it, so keys can be added or
+        overwritten but never removed. That constraint is why consent-tag
+        removal writes a `user_removed` tombstone value instead of deleting the
+        key (see context_layer.consent.tags). It also means the payload's own
+        `user_id` survives an update — the memory must remain visible through
+        the user_id-filtered read paths afterwards, which the real-store test
+        in tests/memory/test_isolation.py proves rather than assumes (mem0's
+        `get` strips identity keys out of the metadata dict it returns, so a
+        naive read-modify-write cycle would hand mem0 a metadata dict with no
+        `user_id` in it at all).
+
+        `updates` must not touch the payload keys mem0 or the tenant filter
+        own (`user_id` above all — overwriting it would move the memory across
+        tenants); those raise ValueError before anything reaches mem0.
+
+        A metadata-only update still re-embeds the unchanged text through the
+        local embedder — cheap, and no LLM call.
+
+        Returns ``{"updated": True, "id": ...}`` on success, or
+        ``{"updated": False, "id": ..., "reason": "not_found"}`` for an absent
+        id. Raises TenantIsolationError on a falsy `user_id` or when the id
+        belongs to a different tenant.
+        """
+        user_id = _require_user_id(user_id, op="update a memory's metadata")
+        if not updates:
+            raise ValueError("update_metadata needs at least one key to set")
+        protected = _PROTECTED_METADATA_KEYS.intersection(updates)
+        if protected:
+            raise ValueError(
+                f"Refusing to update metadata keys {sorted(protected)}: they are "
+                "managed by the store/mem0 (overwriting user_id would move the "
+                "memory across tenants)."
+            )
+        existing = self._mem.get(memory_id)
+        if not existing:
+            return {"updated": False, "id": memory_id, "reason": "not_found"}
+        owner = existing.get("user_id")
+        if owner != user_id:
+            raise TenantIsolationError(
+                f"Refusing to update metadata of memory {memory_id!r}: it belongs "
+                f"to a different tenant (owner={owner!r}, caller "
+                f"user_id={user_id!r})."
+            )
+        self._mem.update(memory_id, metadata=dict(updates))
+        return {"updated": True, "id": memory_id}
 
     def delete_all(self, user_id: Optional[str] = None) -> dict:
         """Delete EVERY memory belonging to a single tenant.

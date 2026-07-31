@@ -19,6 +19,7 @@ from typing import NotRequired, Optional, TypedDict
 from mcp.server.fastmcp import Context, FastMCP
 
 from context_layer.consent import (
+    DESCRIPTION_MAX_CHARS,
     RESERVED_OWNER_SLUG,
     SLUG_MAX_CHARS,
     ScopeRegistry,
@@ -34,7 +35,7 @@ _MAX_SCOPES_PER_CALL = 20
 # input, so nothing that passes validation can hit the slug truncation — which
 # would silently collapse two distinct names onto one registry key.
 _MAX_NAME_CHARS = SLUG_MAX_CHARS
-_MAX_DESCRIPTION_CHARS = 300
+_MAX_DESCRIPTION_CHARS = DESCRIPTION_MAX_CHARS
 
 # Lazily built (unlike memory_tools' import-time _store, which exists so tests
 # can patch mem0 before import): the registry has no heavy backend to fake, so

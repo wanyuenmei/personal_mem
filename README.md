@@ -54,14 +54,14 @@ Then [steer each client's instructions](#steer-your-ai-client) so it actually ca
 
 ## See your memories in the browser
 
-`/dashboard` is a read-only memory browser: everything the store holds about you, newest first, with timestamps and as-you-type search. It's served by the same HTTP transport as `/mcp`, behind whichever auth mode the deploy already runs:
+`/dashboard` is the memory browser: everything the store holds about you, newest first, with timestamps and as-you-type search — plus the consent-scope panel, where you review the categories connected apps registered, create scopes of your own, and tag or untag individual memories with them. It's served by the same HTTP transport as `/mcp`, behind whichever auth mode the deploy already runs:
 
 - **OAuth deploy:** open `https://<domain>/dashboard` and sign in with the same WorkOS account your AI clients use — the page shows exactly the namespace they write to. Sign-in needs two extra env vars (`WORKOS_API_KEY` and `WORKOS_COOKIE_PASSWORD` — see `.env.example`) and `https://<domain>/dashboard/callback` registered under **Redirects** in the WorkOS dashboard; until those are set, `/dashboard` answers 503 with the same instructions.
 - **Capability mode:** open `https://<domain>/<token>/dashboard` — the same secret-path credential as `/mcp`, showing the shared single-tenant namespace.
 
 A local stdio setup has no HTTP surface; use `uv run python scripts/inspect_db.py` for the same view in the terminal, or start the server with `MCP_TRANSPORT=streamable-http` and open `http://localhost:8000/dashboard`.
 
-Today the page only reads. Edit and delete actions from the browser are tracked as PER-56 and PER-41.
+The page reads memories and writes only consent state (scopes and tags). Editing or deleting the memories themselves from the browser is tracked as PER-56 and PER-41.
 
 ## Steer your AI client
 
@@ -133,7 +133,7 @@ Each conversation is fed through mem0 extraction. A full import is the most expe
 
 For the full request path — transport → auth guards → tools → identity seam → memory store → mem0 → vector store — see [`ARCHITECTURE.md`](ARCHITECTURE.md). The server also exposes `GET /health` (200, no auth) for liveness/readiness probes.
 
-- **Categories:** the vocabulary now exists, per party rather than global: each third party registers the consent scopes it cares about via the `register_scopes` tool, into a per-user registry (identity is self-asserted until VC-65, so registering grants nothing — it only declares categories the user can see and tag against). Memories still carry no tags yet: tagging (VC-87) and out-of-band classification (VC-88) build on this registry, and mem0 keeps the fact text and its embedding, so categories stay derivable whenever a grant needs them.
+- **Categories:** the vocabulary exists per party rather than global: each third party registers the consent scopes it cares about via the `register_scopes` tool, into a per-user registry (identity is self-asserted until VC-65, so registering grants nothing — it only declares categories the user can see and tag against). Memories carry their tags as one `cs_<scope-key>` metadata key per scope with a provenance value (`user` tags survive re-sweeps, `llm` tags are rebuildable, `user_removed` is a veto the classifier must respect), managed from the dashboard; out-of-band classification (VC-88) builds on the same keys, and mem0 keeps the fact text and its embedding, so `llm` tags stay derivable whenever a grant needs them.
 - **Audit trail:** every tool call emits one line of JSON — tool, resolved tenant, calling client, timestamp — so a deploy's logs can be filtered by any of them. Under OAuth the client is named from its `User-Agent`, because the token identifies the person rather than the app (PER-65). It's structured logging, not yet a queryable audit datastore.
 - **Deletion:** the store has tenant-safe `delete` and `delete_all` primitives, each refusing to act without a valid tenant id. Neither is exposed as an MCP tool yet (PER-57) — they're the foundation the erasure work builds on.
 - **Trust model:** run it fully local (`none` mode: nothing leaves your machine), or self-host the deploy. The hosted instance is a custodian, not an owner — export and delete at any time.
@@ -203,9 +203,9 @@ src/context_layer/
   auth/                 # WorkOS OAuth resource server; capability-path + rate-limit guards
   tools/                # the MCP tools: search_memory / add_memory / register_scopes
   identity/             # resolve_user_id — the tenant seam
-  memory/               # ContextStore over mem0: add/search/all/delete/delete_all
-  consent/              # per-user consent-scope registry (SQLite local / Postgres deploy)
-  dashboard/            # read-only memory browser at /dashboard (AuthKit sign-in on OAuth deploys)
+  memory/               # ContextStore over mem0: add/search/all/update_metadata/delete/delete_all
+  consent/              # per-user consent-scope registry + the cs_* tag vocabulary
+  dashboard/            # memory browser + scope/tag manager at /dashboard (AuthKit sign-in on OAuth deploys)
   observability/        # access/audit log — one JSON line per tool call or page view
   ingest/               # offline backfill: export parsers → normalized format → batch runner
 scripts/
@@ -239,6 +239,6 @@ uv pip install -e ~/repos/mem0   # re-run `uv sync` to go back to the pinned rel
 
 ## Roadmap
 
-Working today: the memory store with its tenant-isolation guard, the two MCP tools, both auth modes, the access log, the read-only memory browser at `/dashboard`, and backfill from a Claude export.
+Working today: the memory store with its tenant-isolation guard, the MCP tools, both auth modes, the access log, the memory browser at `/dashboard` with consent-scope and tag management, and backfill from a Claude export.
 
 Next: retire the capability URL now that OAuth carries real traffic (PER-22) and onboard the first friend tenants (PER-23); tenant hygiene — a per-user export endpoint (PER-24), deletion exposed over MCP (PER-57), an erasure receipt (PER-25); a ChatGPT export parser (PER-28) and an idempotent ingest manifest so re-running an import is safe (PER-29); reconciliation, so a changed preference supersedes its old version instead of overwriting it (PER-32, PER-33); then the consent layer — scoped grants, revocation, deletion propagation (PER-16). Details and status live in the Linear project.

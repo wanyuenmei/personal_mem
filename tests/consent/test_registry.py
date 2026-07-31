@@ -113,6 +113,45 @@ def test_all_spans_owners_and_sorts(registry):
     ]
 
 
+def test_delete_removes_one_scope(registry):
+    registry.register(
+        "mei",
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("journaling", ""), ("finances", "")],
+    )
+
+    assert registry.delete("mei", "journaling__user") is True
+
+    assert registry.get("mei", "journaling__user") is None
+    assert [s.key for s in registry.all("mei")] == ["finances__user"]
+
+
+def test_delete_of_absent_key_reports_false(registry):
+    assert registry.delete("mei", "nope__user") is False
+
+
+def test_delete_is_per_user(registry):
+    """One tenant deleting a key must never touch another tenant's row for
+    the same key."""
+    for user in ("mei", "someone-else"):
+        registry.register(
+            user,
+            owner_type="user",
+            owner_slug=RESERVED_OWNER_SLUG,
+            scopes=[("journaling", "")],
+        )
+
+    assert registry.delete("someone-else", "journaling__user") is True
+
+    assert registry.get("mei", "journaling__user") is not None
+
+
+def test_delete_refuses_blank_user_id(registry):
+    with pytest.raises(ValueError, match="tenant-isolation"):
+        registry.delete("", "journaling__user")
+
+
 def test_blank_user_id_is_refused(registry):
     with pytest.raises(ValueError, match="tenant-isolation"):
         registry.register(

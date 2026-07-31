@@ -182,6 +182,71 @@ def test_delete_without_user_id_raises_before_touching_mem0(fake_mem0):
     fake_mem0.delete.assert_not_called()
 
 
+def test_update_metadata_merges_tags_for_the_owner(fake_mem0):
+    fake_mem0.get.return_value = {"id": "m1", "memory": "x", "user_id": "alice"}
+    store = ContextStore()
+
+    result = store.update_metadata(
+        "m1", {"cs_dietary__tastebuds": "user"}, user_id="alice"
+    )
+
+    fake_mem0.update.assert_called_once_with(
+        "m1", metadata={"cs_dietary__tastebuds": "user"}
+    )
+    assert result == {"updated": True, "id": "m1"}
+
+
+def test_update_metadata_absent_memory_is_not_found(fake_mem0):
+    fake_mem0.get.return_value = None
+    store = ContextStore()
+
+    result = store.update_metadata("gone", {"cs_x__user": "user"}, user_id="alice")
+
+    assert result == {"updated": False, "id": "gone", "reason": "not_found"}
+    fake_mem0.update.assert_not_called()
+
+
+def test_update_metadata_refuses_cross_tenant(fake_mem0):
+    fake_mem0.get.return_value = {"id": "m1", "memory": "x", "user_id": "bob"}
+    store = ContextStore()
+
+    with pytest.raises(TenantIsolationError):
+        store.update_metadata("m1", {"cs_x__user": "user"}, user_id="alice")
+
+    fake_mem0.update.assert_not_called()
+
+
+def test_update_metadata_without_user_id_raises_before_touching_mem0(fake_mem0):
+    store = ContextStore()
+
+    with pytest.raises(TenantIsolationError):
+        store.update_metadata("m1", {"cs_x__user": "user"})
+
+    fake_mem0.get.assert_not_called()
+    fake_mem0.update.assert_not_called()
+
+
+def test_update_metadata_refuses_protected_keys(fake_mem0):
+    """Overwriting the payload's user_id via a metadata merge would re-home the
+    memory to another tenant — the guard must refuse before mem0 is touched."""
+    store = ContextStore()
+
+    with pytest.raises(ValueError, match="managed by the store"):
+        store.update_metadata("m1", {"user_id": "someone-else"}, user_id="alice")
+
+    fake_mem0.get.assert_not_called()
+    fake_mem0.update.assert_not_called()
+
+
+def test_update_metadata_refuses_an_empty_update(fake_mem0):
+    store = ContextStore()
+
+    with pytest.raises(ValueError, match="at least one key"):
+        store.update_metadata("m1", {}, user_id="alice")
+
+    fake_mem0.update.assert_not_called()
+
+
 def test_delete_all_wipes_the_users_memories_and_reports_count(fake_mem0):
     fake_mem0.get_all.return_value = {"results": [{"id": "1"}, {"id": "2"}]}
     store = ContextStore()

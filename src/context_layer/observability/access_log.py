@@ -144,6 +144,30 @@ def log_dashboard_view(user_id: str, client: str) -> None:
     )
 
 
+def log_dashboard_action(user_id: str, action: str, client: str) -> None:
+    """Log one dashboard mutation — a scope created or deleted, a tag added or
+    removed. The dashboard is the first surface that *changes* consent state,
+    so its writes belong in the audit log at least as much as its reads.
+
+    Same keys as ``log_dashboard_view`` plus ``action`` (e.g. ``tags_add``,
+    ``scopes_delete``) so Railway can filter mutations apart from views.
+    """
+    logger.info(
+        json.dumps(
+            {
+                "level": "info",
+                "message": "dashboard_action",
+                "tool": "dashboard",
+                "action": _bounded(action, "unknown"),
+                "user": user_id,
+                "client": _bounded(client, "unlabeled"),
+                "client_id": "none",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+    )
+
+
 def log_tool_call(tool: str, ctx: Context | None) -> None:
     """Log one access/audit record: tool, user, client, timestamp.
 

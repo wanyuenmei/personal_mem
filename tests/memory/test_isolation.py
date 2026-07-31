@@ -142,6 +142,79 @@ def test_delete_all_wipes_only_the_targeted_tenant(store: ContextStore) -> None:
     assert _texts(store.all(user_id=bystander)), "bystander's memory must survive"
 
 
+def test_update_metadata_keeps_the_memory_visible_to_its_owner(
+    store: ContextStore,
+) -> None:
+    """THE mem0 trap the consent tagging depends on not falling into: mem0's
+    get() strips identity keys (user_id) out of the metadata dict it returns,
+    and update() writes whatever metadata it is given into the payload. If the
+    payload's user_id did not survive a metadata update, the memory would
+    silently vanish from every user_id-filtered read path — so this asserts
+    visibility through store.all() after the update, against the real store."""
+    owner = "metadata-update-owner"
+    store.add("The user is vegetarian.", user_id=owner)
+    [row] = store.all(user_id=owner)
+
+    result = store.update_metadata(
+        row["id"], {"cs_dietary__tastebuds": "user"}, user_id=owner
+    )
+
+    assert result == {"updated": True, "id": row["id"]}
+    [after] = store.all(user_id=owner)  # empty if user_id was dropped
+    assert after["id"] == row["id"]
+    assert (after.get("metadata") or {})["cs_dietary__tastebuds"] == "user"
+
+
+def test_update_metadata_merges_without_dropping_existing_keys(
+    store: ContextStore,
+) -> None:
+    """Tag writes accumulate: a second scope's key must not clobber the first,
+    nor the provenance metadata the backfill stamped at add time."""
+    owner = "metadata-merge-owner"
+    store.add(
+        "The user runs every morning.",
+        user_id=owner,
+        extra_metadata={"source": "claude"},
+    )
+    [row] = store.all(user_id=owner)
+
+    store.update_metadata(row["id"], {"cs_health__user": "user"}, user_id=owner)
+    store.update_metadata(
+        row["id"], {"cs_routines__app": "user_removed"}, user_id=owner
+    )
+
+    [after] = store.all(user_id=owner)
+    metadata = after.get("metadata") or {}
+    assert metadata["source"] == "claude"
+    assert metadata["cs_health__user"] == "user"
+    assert metadata["cs_routines__app"] == "user_removed"
+
+
+def test_update_metadata_refuses_to_cross_tenants(store: ContextStore) -> None:
+    """Holding another tenant's memory id must not let a caller tag it — the
+    guard raises and the metadata stays untouched."""
+    owner = "metadata-owner-b"
+    intruder = "metadata-intruder"
+    store.add("The user collects vinyl records.", user_id=owner)
+
+    [row] = store.all(user_id=owner)
+    with pytest.raises(TenantIsolationError):
+        store.update_metadata(
+            row["id"], {"cs_hobbies__app": "user"}, user_id=intruder
+        )
+
+    [after] = store.all(user_id=owner)
+    assert "cs_hobbies__app" not in (after.get("metadata") or {})
+
+
+@pytest.mark.parametrize("bad_user_id", FALSY_USER_IDS)
+def test_update_metadata_rejects_falsy_user_id(
+    store: ContextStore, bad_user_id
+) -> None:
+    with pytest.raises(TenantIsolationError):
+        store.update_metadata("any-id", {"cs_x__user": "user"}, user_id=bad_user_id)
+
+
 @pytest.mark.parametrize("bad_user_id", FALSY_USER_IDS)
 def test_delete_rejects_falsy_user_id(store: ContextStore, bad_user_id) -> None:
     with pytest.raises(TenantIsolationError):
