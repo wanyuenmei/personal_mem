@@ -15,6 +15,7 @@ import logging
 
 from mcp.server.fastmcp import Context, FastMCP
 
+from context_layer.consent import tag_new_memories
 from context_layer.identity import resolve_user_id
 from context_layer.memory import ContextStore
 from context_layer.observability import log_tool_call
@@ -78,6 +79,11 @@ def add_memory(text: str, ctx: Context | None = None) -> str:
             "Sorry, I couldn't save that to your context store right now "
             "(a backend error occurred). Please try again shortly."
         )
+    # Consent-scope tagging runs on a daemon thread AFTER the write is safely
+    # done: the classifier is an LLM call, and the user's save must not wait on
+    # it or fail with it. tag_new_memories never raises (VC-88); anything it
+    # misses the dashboard's re-sweep rebuilds.
+    tag_new_memories(_store, user_id, result)
     added = result.get("results", []) if isinstance(result, dict) else result
     n = len(added) if isinstance(added, list) else 1
     return f"Saved to your context store. {n} memory item(s) affected."

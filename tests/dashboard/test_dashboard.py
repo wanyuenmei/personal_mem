@@ -21,8 +21,9 @@ from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
 from context_layer import config
-from context_layer.consent import RESERVED_OWNER_SLUG, ScopeRegistry
+from context_layer.consent import RESERVED_OWNER_SLUG, ScopeRegistry, SweepStatus
 from context_layer.dashboard import DashboardApp
+from context_layer.dashboard import app as app_module
 from context_layer.memory import TenantIsolationError
 
 # What a browser sends on a same-origin form POST to the TestClient host.
@@ -681,3 +682,115 @@ def test_mutations_log_a_dashboard_action(store, registry, capability_app, caplo
     logged = json.loads(record.getMessage())
     assert logged["action"] == "tags_add"
     assert logged["user"] == config.DEFAULT_USER_ID
+
+
+# --- the classifier sweep -------------------------------------------------
+
+
+def _page_data(page: str) -> dict:
+    """The JSON block the page hands to its client-side rendering. Safe to
+    slice on "</script>": the embed escapes every "/", so the first one after
+    the block is the real closing tag."""
+    start = page.index('id="data">') + len('id="data">')
+    return json.loads(page[start : page.index("</script>", start)])
+
+
+class _FakeRunner:
+    """Stands in for the process-wide SweepRunner: records start() calls and
+    reports whatever status a test wants the page to render."""
+
+    def __init__(self, started=True, status=None):
+        self.started = started
+        self._status = status or SweepStatus()
+        self.calls = []
+
+    def start(self, store, registry, user_id):
+        self.calls.append(user_id)
+        return self.started
+
+    def status(self, user_id):
+        return self._status
+
+
+@pytest.fixture
+def tagging_on(monkeypatch):
+    """A server where the classifier is configured to run."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: True)
+
+
+def _install_runner(monkeypatch, runner):
+    monkeypatch.setattr(app_module, "get_sweep_runner", lambda: runner)
+    return runner
+
+
+def test_sweep_starts_a_background_pass(capability_app, monkeypatch, tagging_on):
+    runner = _install_runner(monkeypatch, _FakeRunner())
+
+    resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    assert runner.calls == [config.DEFAULT_USER_ID]
+
+
+def test_sweep_is_refused_when_the_classifier_is_off(capability_app, monkeypatch):
+    """Nothing is sent to a model outside EXTRACTION_MODE=anthropic, so the
+    endpoint says so rather than starting a pass that would tag nothing."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    runner = _install_runner(monkeypatch, _FakeRunner())
+
+    resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
+
+    assert resp.status_code == 409
+    assert runner.calls == []
+
+
+def test_a_sweep_already_running_is_logged_not_an_error(
+    capability_app, monkeypatch, caplog, tagging_on
+):
+    _install_runner(monkeypatch, _FakeRunner(started=False))
+    caplog.set_level(logging.INFO, logger="context_layer.access")
+
+    resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
+
+    assert resp.status_code == 303
+    [record] = [r for r in caplog.records if "dashboard_action" in r.getMessage()]
+    assert json.loads(record.getMessage())["action"] == "sweep_busy"
+
+
+def test_cross_origin_sweep_is_rejected(capability_app, monkeypatch, tagging_on):
+    runner = _install_runner(monkeypatch, _FakeRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/sweep", headers={"origin": "https://evil.example"}
+    )
+
+    assert resp.status_code == 403
+    assert runner.calls == []
+
+
+def test_get_on_the_sweep_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/sweep").status_code == 405
+
+
+def test_page_renders_the_sweep_status(capability_app, monkeypatch, tagging_on):
+    _install_runner(
+        monkeypatch,
+        _FakeRunner(status=SweepStatus(state="running", total=7, processed=3)),
+    )
+
+    resp = _client(capability_app).get("/dashboard")
+
+    data = _page_data(resp.text)
+    assert data["tagging_enabled"] is True
+    assert data["sweep"]["state"] == "running"
+    assert (data["sweep"]["total"], data["sweep"]["processed"]) == (7, 3)
+
+
+def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch):
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    _install_runner(monkeypatch, _FakeRunner())
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["tagging_enabled"] is False

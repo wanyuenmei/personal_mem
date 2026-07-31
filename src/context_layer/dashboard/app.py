@@ -3,7 +3,7 @@
 Sits in front of the MCP app on the HTTP transport and owns every /dashboard*
 path; anything else passes straight through. Reads render store.all() and the
 consent-scope registry; the dashboard is also the consent layer's first
-mutating surface — two form-POST endpoints let the user manage scopes and
+mutating surface — three form-POST endpoints let the user manage scopes and
 per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
 
 - POST /dashboard/scopes — create or delete a scope the user owns (the
@@ -11,6 +11,11 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   here; their vocabulary is managed by re-registration.
 - POST /dashboard/tags — add or remove one consent-scope tag on one memory,
   written into mem0 metadata via the tenant-guarded store.update_metadata.
+- POST /dashboard/sweep — re-run the classifier over every memory. Returns as
+  soon as the background thread is started; the page renders that thread's
+  progress on reload. This is the rebuild path after any vocabulary change,
+  and it is user-triggered by design — classification never runs on a page
+  view.
 
 Mutations are guarded by the same principal resolution as the page plus a
 same-origin check (Origin, falling back to Referer, must name the host the
@@ -65,6 +70,8 @@ from context_layer.consent import (
     RESERVED_OWNER_SLUG,
     SLUG_MAX_CHARS,
     ScopeRegistry,
+    classifier_enabled,
+    get_sweep_runner,
     slugify,
     tag_key,
 )
@@ -85,7 +92,7 @@ _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 _BACK_TO_PAGE = "../dashboard"
 
 _AUTH_PATHS = ("/dashboard/login", "/dashboard/callback", "/dashboard/logout")
-_POST_PATHS = ("/dashboard/scopes", "/dashboard/tags")
+_POST_PATHS = ("/dashboard/scopes", "/dashboard/tags", "/dashboard/sweep")
 
 
 def _json_safe(data: dict) -> dict:
@@ -211,6 +218,8 @@ class DashboardApp:
             render_page(
                 rows, scopes,
                 user_label=principal.label, show_logout=self.oauth_mode,
+                sweep=get_sweep_runner().status(principal.user_id).as_dict(),
+                tagging_enabled=classifier_enabled(),
             )
         )
         if principal.fresh_cookie:
@@ -237,6 +246,8 @@ class DashboardApp:
         try:
             if path == "/dashboard/scopes":
                 response = await self._scopes_action(fields, principal, request)
+            elif path == "/dashboard/sweep":
+                response = await self._sweep_action(principal, request)
             else:
                 response = await self._tags_action(fields, principal, request)
         except Exception:
@@ -355,6 +366,35 @@ class DashboardApp:
             return PlainTextResponse("no such memory", status_code=404)
         log_dashboard_action(
             principal.user_id, f"tags_{action}", self._client_label(request)
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _sweep_action(self, principal: _Principal, request: Request) -> Response:
+        """Start a full re-classification of this user's memories.
+
+        Returns as soon as the thread is running — a sweep is one LLM call per
+        memory and would blow any request timeout if awaited. The page reads
+        the runner's per-user status on the next load, so "did it finish" is a
+        reload, not a held-open connection.
+
+        A second POST while one is already running is accepted and ignored
+        (logged as ``sweep_busy``) rather than erroring: the user clicked a
+        button twice, which is not a failure worth showing them.
+        """
+        if not classifier_enabled():
+            return PlainTextResponse(
+                "Automatic tagging is off on this server: memories are only "
+                "classified when EXTRACTION_MODE=anthropic, so nothing is sent "
+                "to a model. You can still tag memories yourself.",
+                status_code=409,
+            )
+        started = get_sweep_runner().start(
+            self.store, self._registry(), principal.user_id
+        )
+        log_dashboard_action(
+            principal.user_id,
+            "sweep_start" if started else "sweep_busy",
+            self._client_label(request),
         )
         return RedirectResponse(_BACK_TO_PAGE, status_code=303)
 

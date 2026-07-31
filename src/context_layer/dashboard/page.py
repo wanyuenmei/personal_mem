@@ -22,6 +22,7 @@ plus the registry.
 
 import html
 import json
+from typing import Optional
 
 from context_layer.consent import ConsentScope, active_tags
 
@@ -133,6 +134,14 @@ _PAGE = """<!doctype html>
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
   .muted { color: var(--muted); font-size: .85rem; margin: .25rem 0; }
+  #sweep { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+           margin-top: .6rem; }
+  #sweep button {
+    padding: .25rem .7rem; font-size: .82rem; cursor: pointer; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
+  }
+  #sweep button:disabled { cursor: default; opacity: .6; }
+  #sweep .muted { margin: 0; }
   #search {
     width: 100%; padding: .6rem .8rem; font-size: 1rem; color: var(--fg);
     background: var(--card); border: 1px solid var(--border);
@@ -155,6 +164,7 @@ _PAGE = """<!doctype html>
   <section id="scopes-panel">
     <h2>Consent scopes</h2>
     <div id="scopes"></div>
+    <div id="sweep"></div>
     <details class="new-scope">
       <summary>Create your own scope</summary>
       <form method="post" data-endpoint="scopes">
@@ -258,6 +268,46 @@ _PAGE = """<!doctype html>
     }
   }
 
+  // The re-tag control plus whatever the last/current sweep is doing. Status
+  // is in-process on the server, so "running" advances by reloading the page
+  // rather than by polling an endpoint that doesn't exist.
+  function renderSweep() {
+    const el = document.getElementById("sweep");
+    const note = document.createElement("p");
+    note.className = "muted";
+    if (!data.tagging_enabled) {
+      note.textContent = "Automatic tagging is off on this server " +
+        "(EXTRACTION_MODE is not anthropic), so no memory is ever sent to a " +
+        "model. You can still tag memories yourself below.";
+      el.appendChild(note);
+      return;
+    }
+    const s = data.sweep || {};
+    const running = s.state === "running";
+    const form = postForm("sweep", {});
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = running ? "Re-tagging\\u2026" : "Re-tag all memories";
+    btn.disabled = running;
+    form.appendChild(btn);
+    el.appendChild(form);
+    if (running) {
+      note.textContent = s.total
+        ? "Classifying " + s.processed + " of " + s.total + "\\u2026"
+        : "Starting\\u2026";
+      setTimeout(() => location.reload(), 3000);
+    } else if (s.state === "done") {
+      note.textContent = "Last run: " + s.changed + " of " + s.total +
+        " memories updated \\u00b7 " + fmt(s.finished_at);
+    } else if (s.state === "error") {
+      note.textContent = "Last run failed (" + s.error + "). Try again.";
+    } else {
+      note.textContent = "Tags are derived from your memories \\u2014 re-run " +
+        "this after adding or changing scopes.";
+    }
+    el.appendChild(note);
+  }
+
   function tagRowFor(r) {
     const tags = r.tags || {};
     const tagRow = document.createElement("div");
@@ -333,6 +383,7 @@ _PAGE = """<!doctype html>
   }
 
   renderScopes();
+  renderSweep();
   search.addEventListener("input", () => render(search.value));
   render("");
 </script>
@@ -347,10 +398,23 @@ def render_page(
     *,
     user_label: str,
     show_logout: bool,
+    sweep: Optional[dict] = None,
+    tagging_enabled: bool = False,
 ) -> str:
-    """Render the full memory-browser document for one user's rows + scopes."""
+    """Render the full memory-browser document for one user's rows + scopes.
+
+    ``sweep`` is the in-process status of that user's re-tagging run (see
+    consent.tagging.SweepStatus) and ``tagging_enabled`` says whether the
+    classifier can run here at all — the panel explains the off state rather
+    than offering a button that would do nothing.
+    """
     who = f"{html.escape(user_label)} &middot; <span id=\"count\"></span> memories"
     if show_logout:
         who += " &middot; <a href=\"/dashboard/logout\">Sign out</a>"
-    data = {"memories": _rows_to_payload(rows), "scopes": _scopes_to_payload(scopes)}
+    data = {
+        "memories": _rows_to_payload(rows),
+        "scopes": _scopes_to_payload(scopes),
+        "sweep": sweep or {"state": "idle"},
+        "tagging_enabled": bool(tagging_enabled),
+    }
     return _PAGE.replace("__WHO__", who).replace("__DATA__", _json_for_script(data))

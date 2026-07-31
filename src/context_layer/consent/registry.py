@@ -51,6 +51,13 @@ _NON_SLUG_RE = re.compile(r"[^a-z0-9]+")
 # Descriptions are shown to the user and bounded so no registration surface
 # (the register_scopes tool, the dashboard's create-scope form) can stuff
 # unbounded text into the registry.
+#
+# A third party's description is self-asserted, and it does not only get
+# displayed: the scope classifier puts it in the prompt that decides which of
+# the user's memories carry this scope. That makes it untrusted input to a
+# prompt, bounded here by length and flattened to one line at the call site,
+# but not otherwise validated — VC-89 covers doing that properly, before
+# anything enforces access off these tags.
 DESCRIPTION_MAX_CHARS = 300
 
 _SCHEMA = """
