@@ -22,6 +22,12 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   the user's own scopes. Two actions rather than one because a scope key is
   what a future consent grant gates on: model output never reaches the
   registry without a person in between.
+- POST /dashboard/retention — memory triage (VC-94). `sweep` starts the pass
+  that judges every memory on whether it would inform a later decision;
+  `keep` and `archive` set one memory's state by hand, which no later pass
+  overrules. Nothing here deletes: archived memories keep their own section
+  on the page, and the only thing that changes is that search stops returning
+  them.
 
 Mutations are guarded by the same principal resolution as the page plus a
 same-origin check (Origin, falling back to Referer, must name the host the
@@ -86,6 +92,14 @@ from context_layer.consent import (
     suggest_scopes,
     tag_key,
 )
+from context_layer.curation import (
+    SOURCE_USER,
+    STATE_ARCHIVED,
+    STATE_KEEP,
+    get_triage_runner,
+    state_updates,
+    triage_enabled,
+)
 from context_layer.dashboard.page import render_page
 from context_layer.memory import ContextStore, TenantIsolationError
 from context_layer.observability import log_dashboard_action, log_dashboard_view
@@ -108,6 +122,7 @@ _POST_PATHS = (
     "/dashboard/tags",
     "/dashboard/sweep",
     "/dashboard/suggest",
+    "/dashboard/retention",
 )
 
 
@@ -237,6 +252,8 @@ class DashboardApp:
                 sweep=get_sweep_runner().status(principal.user_id).as_dict(),
                 suggestions=get_proposal_holder().get(principal.user_id).as_dict(),
                 tagging_enabled=classifier_enabled(),
+                triage=get_triage_runner().status(principal.user_id).as_dict(),
+                triage_enabled=triage_enabled(),
             )
         )
         if principal.fresh_cookie:
@@ -269,6 +286,8 @@ class DashboardApp:
                 # The raw form, not `fields`: the confirm checklist submits one
                 # `key` per ticked proposal, which flattening to a dict loses.
                 response = await self._suggest_action(form, principal, request)
+            elif path == "/dashboard/retention":
+                response = await self._retention_action(fields, principal, request)
             else:
                 response = await self._tags_action(fields, principal, request)
         except Exception:
@@ -495,6 +514,67 @@ class DashboardApp:
             return PlainTextResponse("unknown suggestion action", status_code=400)
         log_dashboard_action(
             principal.user_id, f"suggest_{action}", self._client_label(request)
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _retention_action(
+        self, fields: dict, principal: _Principal, request: Request
+    ) -> Response:
+        """Start a triage pass, or set one memory's retention state by hand.
+
+        ``sweep`` is the model's pass over everything, started on a background
+        thread exactly like the scope sweep and for the same reason — one call
+        per memory would blow any request timeout if awaited — with the page
+        reading its progress on the next load.
+
+        ``keep`` and ``archive`` are the user overruling it, one memory at a
+        time. Both write the same three keys the pass writes, under the
+        ``user`` provenance that stops any later pass re-deciding them: this
+        is the escape hatch that makes an automatic pass safe to run at all.
+        Neither deletes anything — archiving is a state, and an archived
+        memory keeps its place on this page.
+        """
+        action = fields.get("action") or ""
+        if action == "sweep":
+            if not triage_enabled():
+                return PlainTextResponse(
+                    "Triage is off on this server: memories are only judged by "
+                    "a model when EXTRACTION_MODE=anthropic, so nothing is sent "
+                    "to one. You can still set memories aside yourself.",
+                    status_code=409,
+                )
+            started = get_triage_runner().start(self.store, principal.user_id)
+            log_dashboard_action(
+                principal.user_id,
+                "retention_sweep_start" if started else "retention_sweep_busy",
+                self._client_label(request),
+            )
+            return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+        if action not in ("keep", "archive"):
+            return PlainTextResponse("unknown retention action", status_code=400)
+        memory_id = (fields.get("memory_id") or "").strip()
+        if not memory_id:
+            return PlainTextResponse("memory_id is required", status_code=400)
+        state = STATE_ARCHIVED if action == "archive" else STATE_KEEP
+        try:
+            result = await run_in_threadpool(
+                self.store.update_metadata,
+                memory_id,
+                state_updates(state, SOURCE_USER),
+                principal.user_id,
+            )
+        except TenantIsolationError:
+            # Another tenant's memory id: for THIS viewer it doesn't exist, and
+            # the response must not reveal otherwise — same as the tag path.
+            logger.warning(
+                "dashboard retention write refused: memory %r is not user %r's",
+                memory_id, principal.user_id,
+            )
+            return PlainTextResponse("no such memory", status_code=404)
+        if not result.get("updated"):
+            return PlainTextResponse("no such memory", status_code=404)
+        log_dashboard_action(
+            principal.user_id, f"retention_{action}", self._client_label(request)
         )
         return RedirectResponse(_BACK_TO_PAGE, status_code=303)
 

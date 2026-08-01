@@ -19,6 +19,12 @@ Search is client-side substring filtering over the full list — fine for the
 size of a personal store, and it keeps the page a pure read of store.all()
 plus the registry.
 
+Archived memories (VC-94) are rendered too, in their own collapsed section
+below the active ones, each with the reason it was set aside and a button
+that puts it back. Nowhere else can a user see what an automatic pass decided
+about their own store, so "archived" must not mean "invisible here" — only
+"no longer returned by search".
+
 The eye toggles that mask memory text are a display setting and nothing more:
 they live in localStorage, never in the store, and change nothing about what
 connected apps can read. The text they mask is still in this document's data
@@ -31,6 +37,7 @@ import json
 from typing import Optional
 
 from context_layer.consent import ConsentScope, active_tags
+from context_layer.curation import decided_by_user, retention_reason, retention_state
 
 
 # Rendered into the page <script> data block. json.dumps with these settings
@@ -53,6 +60,14 @@ def _rows_to_payload(rows: list[dict]) -> list[dict]:
                 "source": str(metadata.get("source") or ""),
                 # {scope_key: provenance}; user_removed already reads as untagged
                 "tags": active_tags(metadata),
+                # Kept or set aside, and by whom — the page shows an automatic
+                # decision differently from one the user made, because only the
+                # first is something they might want to argue with.
+                "retention": {
+                    "state": retention_state(metadata),
+                    "by_user": decided_by_user(metadata),
+                    "reason": retention_reason(metadata),
+                },
             }
         )
     return payload
@@ -101,7 +116,7 @@ _PAGE = """<!doctype html>
   h2 { font-size: 1.05rem; margin: 0 0 .35rem; }
   .who { color: var(--muted); font-size: .9rem; margin: 0 0 1.25rem; }
   .who a { color: var(--accent); }
-  #scopes-panel {
+  #scopes-panel, #triage-panel {
     background: var(--card); border: 1px solid var(--border);
     border-radius: .5rem; padding: .8rem 1rem; margin-bottom: 1.25rem;
   }
@@ -144,14 +159,15 @@ _PAGE = """<!doctype html>
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
   .muted { color: var(--muted); font-size: .85rem; margin: .25rem 0; }
-  #sweep { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
-           margin-top: .6rem; }
-  #sweep button, #suggest button {
+  #sweep, #triage { display: flex; align-items: center; gap: .5rem;
+           flex-wrap: wrap; }
+  #sweep { margin-top: .6rem; }
+  #sweep button, #suggest button, #triage button {
     padding: .25rem .7rem; font-size: .82rem; cursor: pointer; color: var(--fg);
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
-  #sweep button:disabled { cursor: default; opacity: .6; }
-  #sweep .muted { margin: 0; }
+  #sweep button:disabled, #triage button:disabled { cursor: default; opacity: .6; }
+  #sweep .muted, #triage .muted { margin: 0; }
   #suggest { margin-top: .6rem; }
   #suggest .muted { margin: .35rem 0 0; }
   form.proposals { display: block; margin: 0; }
@@ -192,7 +208,14 @@ _PAGE = """<!doctype html>
     color: var(--muted);
   }
   .eye:hover, .eye[aria-pressed="true"] { color: var(--accent); }
-  .meta { color: var(--muted); font-size: .78rem; }
+  .meta {
+    display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap;
+    color: var(--muted); font-size: .78rem;
+  }
+  .reason { color: var(--muted); font-size: .8rem; margin: 0 0 .35rem; }
+  #archived { margin-top: 1.5rem; }
+  #archived summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+  #archived-list { margin-top: .6rem; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
 </style>
 </head>
@@ -220,8 +243,16 @@ _PAGE = """<!doctype html>
       </form>
     </details>
   </section>
+  <section id="triage-panel">
+    <h2>What&rsquo;s worth keeping</h2>
+    <div id="triage"></div>
+  </section>
   <input id="search" type="search" placeholder="Search your memories&hellip;" autocomplete="off">
   <main id="list"></main>
+  <details id="archived" hidden>
+    <summary id="archived-summary"></summary>
+    <div id="archived-list"></div>
+  </details>
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -268,6 +299,16 @@ _PAGE = """<!doctype html>
 
   function scopeLabel(s) {
     return s.owner === "user" ? s.name : s.name + " \\u00b7 " + s.owner;
+  }
+
+  // Both background passes advance by reloading the page rather than polling.
+  // Shared so that with a re-tag and a triage running at once the page still
+  // reloads once every three seconds, not twice.
+  let reloadPending = false;
+  function scheduleReload() {
+    if (reloadPending) return;
+    reloadPending = true;
+    setTimeout(() => location.reload(), 3000);
   }
 
   // --- screen privacy ----------------------------------------------------
@@ -527,7 +568,7 @@ _PAGE = """<!doctype html>
       note.textContent = s.total
         ? "Classifying " + s.processed + " of " + s.total + "\\u2026"
         : "Starting\\u2026";
-      setTimeout(() => location.reload(), 3000);
+      scheduleReload();
     } else if (s.state === "done" && !s.scope_count) {
       // Scopes exist now (checked above) but didn't when that run happened,
       // so the stored "0 of 0" describes an empty vocabulary, not a no-op.
@@ -551,6 +592,60 @@ _PAGE = """<!doctype html>
     } else {
       note.textContent = "Tags are derived from your memories \\u2014 re-run " +
         "this after adding or changing scopes.";
+    }
+    el.appendChild(note);
+  }
+
+  // The pass that decides which memories still earn their place, plus what
+  // the last one did. Deliberately worded so nothing here reads like a
+  // delete: it sets memories aside, and it says how to undo that.
+  function renderTriage() {
+    const el = document.getElementById("triage");
+    const note = document.createElement("p");
+    note.className = "muted";
+    if (!data.triage_enabled) {
+      note.textContent = "Automatic review is off on this server " +
+        "(EXTRACTION_MODE is not anthropic), so no memory is ever sent to a " +
+        "model. You can still set memories aside yourself.";
+      el.appendChild(note);
+      return;
+    }
+    const t = data.triage || {};
+    const running = t.state === "running";
+    const form = postForm("retention", { action: "sweep" });
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = running ? "Reviewing\\u2026" : "Review my memories";
+    btn.disabled = running;
+    form.appendChild(btn);
+    el.appendChild(form);
+    if (running) {
+      note.textContent = t.total
+        ? "Reviewing " + t.processed + " of " + t.total + "\\u2026"
+        : "Starting\\u2026";
+      scheduleReload();
+    } else if (t.state === "done") {
+      // Both directions, because a run that put memories back is the one the
+      // user most needs to know happened.
+      const moved = [
+        t.archived ? t.archived + " set aside" : "",
+        t.restored ? t.restored + " put back" : "",
+      ].filter(Boolean).join(", ") || "nothing changed";
+      note.textContent = "Last run over " + t.total + " memories: " + moved +
+        (t.failed ? " \\u00b7 " + t.failed + " could not be reviewed " +
+          "(see the server logs)" : "") +
+        " \\u00b7 " + fmt(t.finished_at);
+    } else if (t.state === "error") {
+      note.textContent = t.error === "all_failed"
+        ? "Last run could not review any of your " + t.total + " memories. " +
+          "That usually means this server can't reach the model \\u2014 check " +
+          "its API key and model settings, then the server logs for the error."
+        : "Last run failed (" + t.error + "). Try again.";
+    } else {
+      note.textContent = "One pass over every memory, keeping what would " +
+        "inform a later decision and setting the rest aside. Nothing is " +
+        "deleted \\u2014 set-aside memories stay below, and you can put any " +
+        "of them back.";
     }
     el.appendChild(note);
   }
@@ -599,45 +694,104 @@ _PAGE = """<!doctype html>
     return isNaN(d) ? ts : d.toLocaleString();
   }
 
+  function isArchived(r) {
+    return (r.retention || {}).state === "archived";
+  }
+
+  // Why a memory is out of the way, in the words of whoever put it there.
+  // An automatic decision says it was automatic: that is the one the user
+  // might want to argue with, and the button beside it is how they do.
+  function reasonLine(r) {
+    const retention = r.retention || {};
+    const why = document.createElement("p");
+    why.className = "reason";
+    why.textContent = retention.by_user
+      ? "Set aside by you"
+      : "Set aside automatically" +
+        (retention.reason ? " \\u2014 " + retention.reason : "");
+    return why;
+  }
+
+  function retentionForm(r) {
+    const archived = isArchived(r);
+    const form = postForm("retention",
+      { action: archived ? "keep" : "archive", memory_id: r.id });
+    form.appendChild(chipButton(
+      archived ? "Keep" : "Set aside",
+      archived
+        ? "Put this back \\u2014 searches will return it again"
+        : "Stop this coming back in searches. It stays here, and nothing " +
+          "is deleted."));
+    return form;
+  }
+
+  function memoryCard(r) {
+    const card = document.createElement("div");
+    card.className = "memory";
+    const hidden = isHidden(r);
+    const text = document.createElement("p");
+    text.textContent = hidden ? mask(r.text) : r.text;
+    if (hidden) text.className = "masked";
+    const head = document.createElement("div");
+    head.className = "memory-head";
+    head.append(text, eyeButton(r));
+    card.appendChild(head);
+    if (isArchived(r)) card.appendChild(reasonLine(r));
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const when = document.createElement("span");
+    when.textContent = [fmt(r.created_at), r.source && "from " + r.source]
+      .filter(Boolean).join(" · ");
+    meta.append(when, retentionForm(r));
+    card.appendChild(meta);
+    const tagRow = tagRowFor(r);
+    if (tagRow.childNodes.length) card.appendChild(tagRow);
+    return card;
+  }
+
   function render(filter) {
     const q = filter.trim().toLowerCase();
-    const shown = q ? rows.filter(r => r.text.toLowerCase().includes(q)) : rows;
+    const matches = r => !q || r.text.toLowerCase().includes(q);
+    // The count in the header is the ACTIVE store — what a client searching
+    // this account would actually be answered from.
+    const active = rows.filter(r => !isArchived(r));
+    const shown = active.filter(matches);
     list.replaceChildren();
-    count.textContent = q ? shown.length + " of " + rows.length : String(rows.length);
+    count.textContent = q ? shown.length + " of " + active.length
+                          : String(active.length);
     if (!shown.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = rows.length
-        ? "No memories match that search."
+      empty.textContent = active.length ? "No memories match that search."
+        : rows.length ? "Every memory is set aside — they're listed below."
         : "Nothing stored yet — connect a client and start talking.";
       list.appendChild(empty);
-      return;
+    } else {
+      for (const r of shown) list.appendChild(memoryCard(r));
     }
-    for (const r of shown) {
-      const card = document.createElement("div");
-      card.className = "memory";
-      const hidden = isHidden(r);
-      const text = document.createElement("p");
-      text.textContent = hidden ? mask(r.text) : r.text;
-      if (hidden) text.className = "masked";
-      const head = document.createElement("div");
-      head.className = "memory-head";
-      head.append(text, eyeButton(r));
-      const meta = document.createElement("div");
-      meta.className = "meta";
-      meta.textContent = [fmt(r.created_at), r.source && "from " + r.source]
-        .filter(Boolean).join(" · ");
-      card.append(head, meta);
-      const tagRow = tagRowFor(r);
-      if (tagRow.childNodes.length) card.appendChild(tagRow);
-      list.appendChild(card);
-    }
+    renderArchived(rows.filter(r => isArchived(r) && matches(r)), q);
+  }
+
+  // Set-aside memories, collapsed but never hidden: they are still the user's
+  // and this page is the only place they can see what was done to them.
+  function renderArchived(shown, q) {
+    const panel = document.getElementById("archived");
+    const total = rows.filter(r => isArchived(r)).length;
+    panel.hidden = !total;
+    if (!total) return;
+    document.getElementById("archived-summary").textContent = q
+      ? shown.length + " of " + total + " set aside"
+      : total + " set aside";
+    const listEl = document.getElementById("archived-list");
+    listEl.replaceChildren();
+    for (const r of shown) listEl.appendChild(memoryCard(r));
   }
 
   loadHideState();
   renderScopes();
   renderSuggest();
   renderSweep();
+  renderTriage();
   renderHideAll();
   document.getElementById("hide-all").addEventListener("click", toggleHideAll);
   search.addEventListener("input", () => render(search.value));
@@ -657,14 +811,22 @@ def render_page(
     sweep: Optional[dict] = None,
     suggestions: Optional[dict] = None,
     tagging_enabled: bool = False,
+    triage: Optional[dict] = None,
+    triage_enabled: bool = False,
 ) -> str:
     """Render the full memory-browser document for one user's rows + scopes.
 
     ``sweep`` is the in-process status of that user's re-tagging run (see
     consent.tagging.SweepStatus), ``suggestions`` the scope candidates waiting
-    for them to tick (consent.discovery.ProposalSet), and ``tagging_enabled``
-    says whether a model can be called here at all — the panel explains the
-    off state rather than offering buttons that would do nothing.
+    for them to tick (consent.discovery.ProposalSet), ``triage`` the status of
+    their last retention pass (curation.sweep.TriageStatus), and the two
+    ``*_enabled`` flags say whether a model can be called here at all — each
+    panel explains its off state rather than offering a button that would do
+    nothing.
+
+    ``rows`` is the WHOLE store, archived memories included: this page is the
+    one place a set-aside memory is still visible, and it splits them out
+    itself rather than being handed a pre-filtered list.
     """
     who = f"{html.escape(user_label)} &middot; <span id=\"count\"></span> memories"
     if show_logout:
@@ -675,5 +837,7 @@ def render_page(
         "sweep": sweep or {"state": "idle"},
         "suggestions": suggestions or {"proposals": [], "generated_at": ""},
         "tagging_enabled": bool(tagging_enabled),
+        "triage": triage or {"state": "idle"},
+        "triage_enabled": bool(triage_enabled),
     }
     return _PAGE.replace("__WHO__", who).replace("__DATA__", _json_for_script(data))

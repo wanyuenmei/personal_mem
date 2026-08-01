@@ -18,9 +18,11 @@ flowchart LR
     tools --> store
     tools --> consent["consent/<br/>ScopeRegistry · scope classifier · scope discovery"]
     tools --> obs["observability/<br/>access log"]
-    dash["dashboard/<br/>memory browser + scope manager"] --> store
+    dash["dashboard/<br/>memory browser + scope manager + triage"] --> store
     dash --> consent
+    dash --> curation["curation/<br/>retention state · triage pass"]
     dash --> obs
+    curation --> store
     identity["identity/<br/>resolve_user_id — tenant seam"] --> store
     store["memory/<br/>ContextStore"] --> mem0["mem0<br/>extraction LLM + local embedder"]
   end
@@ -40,9 +42,10 @@ flowchart LR
 | Auth | `auth/` | WorkOS OAuth token verifier, capability-path + rate-limit guards | an auth/gateway service |
 | Tools | `tools/` | the MCP tools (`search_memory`, `add_memory`, `register_scopes`) | the MCP-facing service |
 | Identity | `identity/` | `resolve_user_id` — the single tenant-isolation seam | shared client of an auth service |
-| Memory | `memory/` | `ContextStore` over mem0: `add`/`search`/`all`/`update_metadata`/`delete`/`delete_all`, each behind the tenant guard | the **memory service** |
+| Memory | `memory/` | `ContextStore` over mem0: `add`/`search`/`all`/`update_metadata`/`delete`/`delete_all`, each behind the tenant guard; `search` also leaves out archived memories | the **memory service** |
 | Consent | `consent/` | `ScopeRegistry` — the per-user vocabulary of consent scopes, per owning party (SQLite locally, the deploy's Postgres under pgvector) — plus the `cs_*` tag/provenance vocabulary memories carry, the classifier that derives those tags out of band, and the discovery pass that proposes a starting vocabulary from the user's own memories for them to approve | the **consent service** |
-| Dashboard | `dashboard/` | the memory browser at `/dashboard`: read your memories, manage scopes and per-memory tags, suggest scopes from your memories, re-run the classifier over the whole store, mask memory text for screen sharing; AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
+| Curation | `curation/` | the retention state each memory carries (kept or archived, with provenance and the reason it was set aside) plus the out-of-band triage pass that decides it — the thing that keeps `search_memory` answering from what still informs a decision | part of the **memory service** |
+| Dashboard | `dashboard/` | the memory browser at `/dashboard`: read your memories, manage scopes and per-memory tags, suggest scopes from your memories, re-run the classifier over the whole store, review what is still worth keeping and set memories aside or put them back, mask memory text for screen sharing; AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
 | Ingest | `ingest/` | offline backfill: export parsers → normalized format → mem0 extraction | a batch import worker |
 | Observability | `observability/` | one line of JSON per tool call: tool, tenant, client, timestamp | ships to a log/metrics sink |
 | Config | `config.py` | env-driven settings + mem0 config builder | 12-factor env per service |
