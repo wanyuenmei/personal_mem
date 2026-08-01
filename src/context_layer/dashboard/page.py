@@ -32,6 +32,19 @@ account would be answered from, so a set-aside memory must not sit in it —
 but nowhere else can a user see what an automatic pass decided about their
 own store, so "archived" must not mean "invisible here" either.
 
+The map (VC-84) is a third tab on that same bar rather than a second view
+switcher: the page already had one way to change what the list below shows,
+and two competing ones would be a worse page than either. It is a radial
+graph of the user at the centre with their scopes around them, sized by how
+much is filed under each, drawn as inline SVG built with createElementNS and
+textContent — so it inherits the same "no markup from data" guarantee as
+everything else here, and needs no library. Opening a scope fans its memories
+out as leaves and dims the rest, and renders the cards themselves below the
+graph, reusing memoryCard rather than trying to make memory text legible
+inside SVG. The one thing the map cannot compute itself is what a scope is
+ABOUT; that comes from the summaries the server holds (consent.summary),
+which is why it has a button rather than generating them on load.
+
 Which tab is open lives in localStorage, for the reason the mask toggles do:
 the panels above reload this page every few seconds while a pass runs, and
 being thrown back to the main list mid-review would make the archived tab
@@ -235,6 +248,34 @@ _PAGE = """<!doctype html>
   .tab[aria-pressed="true"] {
     color: var(--accent); border-color: var(--accent); background: var(--card);
   }
+  #graph { width: 100%; height: auto; display: block; touch-action: manipulation; }
+  #graph text { font-size: 13px; fill: var(--fg); }
+  #graph text.count { fill: var(--muted); font-size: 11px; }
+  #graph .edge { stroke: var(--border); stroke-width: 1.5; }
+  #graph .node { fill: var(--card); stroke: var(--accent); stroke-width: 1.5;
+                 cursor: pointer; }
+  #graph .node.hub { fill: var(--accent); stroke: var(--accent); cursor: default; }
+  #graph .hub-label { fill: var(--bg); font-size: 12px; }
+  #graph .leaf { fill: var(--accent); stroke: none; opacity: .75; }
+  /* Dimming is what "drilled into one scope" looks like: the rest of the map
+     stays on screen for context instead of disappearing. */
+  #graph .dim { opacity: .22; }
+  #map-bar {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    margin-bottom: .4rem;
+  }
+  #map-bar button {
+    padding: .25rem .7rem; font-size: .82rem; cursor: pointer; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
+  }
+  #map-bar .muted { margin: 0; }
+  #map-detail { margin-top: .8rem; }
+  .scope-summary {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: .5rem; padding: .6rem .9rem; margin-bottom: .5rem;
+  }
+  .scope-summary h3 { font-size: .9rem; margin: 0 0 .2rem; }
+  .scope-summary p { margin: 0; font-size: .88rem; color: var(--muted); }
   #filter { display: flex; flex-wrap: wrap; gap: .3rem; margin: 0 0 1rem; }
   .filter-chip {
     font: inherit; font-size: .8rem; cursor: pointer; padding: .1rem .6rem;
@@ -281,6 +322,12 @@ _PAGE = """<!doctype html>
   <nav id="tabs" hidden></nav>
   <div id="filter"></div>
   <main id="list"></main>
+  <section id="map" hidden>
+    <div id="map-bar"></div>
+    <svg id="graph" viewBox="0 0 760 600" role="img"
+         aria-label="Your memories grouped by consent scope"></svg>
+    <div id="map-detail"></div>
+  </section>
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -445,7 +492,7 @@ _PAGE = """<!doctype html>
       if (next === hideAll) hideOverrides.delete(r.id);
       else hideOverrides.set(r.id, next);
       saveHideState();
-      render(search.value);
+      refresh();
     });
     return btn;
   }
@@ -457,7 +504,7 @@ _PAGE = """<!doctype html>
     hideOverrides.clear();
     saveHideState();
     renderHideAll();
-    render(search.value);
+    refresh();
   }
 
   function renderScopes() {
@@ -875,11 +922,13 @@ _PAGE = """<!doctype html>
   // being thrown back to the main list mid-review would make the set-aside
   // tab unusable exactly when someone is reviewing what a pass just did.
   const TAB_KEY = "pcl.tab";
+  const TABS = ["active", "archived", "map"];
   let tab = "active";
 
   function loadTab() {
     try {
-      tab = localStorage.getItem(TAB_KEY) === "archived" ? "archived" : "active";
+      const held = localStorage.getItem(TAB_KEY);
+      tab = TABS.includes(held) ? held : "active";
     } catch {
       tab = "active";  // storage off (private mode)
     }
@@ -893,38 +942,282 @@ _PAGE = """<!doctype html>
     }
   }
 
-  // Only offered once something has been set aside — until then a lone
-  // "In your context" tab is a control with nothing to switch to.
+  // The map is a tab rather than a second view switcher: the bar already
+  // decides what shows below it, and two competing controls for that would
+  // read worse than either. "Set aside" is still only offered once something
+  // has been, but the bar itself now always has somewhere to go.
   function renderTabs() {
     const el = document.getElementById("tabs");
     const archived = rows.filter(r => isArchived(r)).length;
-    el.hidden = !archived;
-    if (!archived) {
-      tab = "active";
-      return;
-    }
+    el.hidden = false;
+    if (!archived && tab === "archived") tab = "active";
     el.replaceChildren();
-    const counts = { active: rows.length - archived, archived: archived };
-    for (const [name, label] of
-         [["active", "In your context"], ["archived", "Set aside"]]) {
+    const entries = [
+      ["active", "In your context (" + (rows.length - archived) + ")",
+       "What a connected app searching your memories is answered from"],
+    ];
+    if (archived) {
+      entries.push(["archived", "Set aside (" + archived + ")",
+        "Memories searches no longer return. Nothing here is deleted."]);
+    }
+    entries.push(["map", "Map",
+      "Your memories grouped by scope, and what each one holds"]);
+    for (const [name, label, why] of entries) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "tab";
-      btn.textContent = label + " (" + counts[name] + ")";
+      btn.textContent = label;
       btn.setAttribute("aria-pressed", String(tab === name));
-      btn.title = name === "archived"
-        ? "Memories searches no longer return. Nothing here is deleted."
-        : "What a connected app searching your memories is answered from";
+      btn.title = why;
       btn.addEventListener("click", () => {
         tab = name;
         saveTab();
-        renderTabs();
-        // The chips count what's in the open tab, so they move with it.
-        renderFilter();
-        render(search.value);
+        showTab();
       });
       el.appendChild(btn);
     }
+  }
+
+  // Re-render whichever view is on screen. The eye toggles reach for this
+  // rather than render() directly: memory cards render in both the list and
+  // under the map now, so redrawing the list would leave the map stale.
+  function refresh() {
+    if (tab === "map") renderMap();
+    else render(search.value);
+  }
+
+  // The search box and the scope chips belong to the two list tabs; the map
+  // narrows by clicking a scope and would be answering two questions at once
+  // if they stayed on screen.
+  function showTab() {
+    const map = tab === "map";
+    document.getElementById("map").hidden = !map;
+    for (const id of ["search", "filter", "list"]) {
+      document.getElementById(id).hidden = map;
+    }
+    renderTabs();
+    // Chip counts are per-tab, so they move with it.
+    if (!map) renderFilter();
+    refresh();
+  }
+
+  // --- the map view ------------------------------------------------------
+
+  // Scopes fan out from the user at the centre, sized by how much is filed
+  // under each, so the shape of the store reads at a glance: which areas are
+  // dense, which are thin, what nothing has claimed yet. Opening one fans its
+  // memories out as leaves and dims the rest — the others stay on screen, so
+  // drilling in never loses the context it was drilled into from.
+  const GEO = { w: 760, h: 600, cx: 380, cy: 285, ring: 155, leaf: 66 };
+  // Enough leaves to read density from; past this the arc turns into a
+  // scribble and the cards below are the honest way to see them.
+  const MAX_LEAVES = 14;
+
+  let openScope = null;
+
+  // Every bucket the map draws: the registry's populated scopes, plus what
+  // nothing has claimed. An untagged pile is the normal state before a sweep,
+  // and a map that quietly dropped it would misstate how much is held.
+  function buckets() {
+    const active = rows.filter(r => !isArchived(r));
+    const counts = new Map();
+    const untagged = [];
+    for (const r of active) {
+      const keys = scopeKeysOf(r);
+      if (!keys.length) untagged.push(r);
+      for (const k of keys) {
+        if (!counts.has(k)) counts.set(k, []);
+        counts.get(k).push(r);
+      }
+    }
+    const out = scopes.filter(s => counts.has(s.key)).map(s => ({
+      key: s.key, label: scopeLabel(s), memories: counts.get(s.key),
+    }));
+    if (untagged.length) {
+      out.push({ key: UNTAGGED, label: "Untagged", memories: untagged });
+    }
+    return out;
+  }
+
+  function summaryFor(key) {
+    const found = (data.summaries.summaries || []).find(s => s.key === key);
+    return found ? found.text : "";
+  }
+
+  function countLabel(n) {
+    return n + (n === 1 ? " memory" : " memories");
+  }
+
+  function nodeRadius(n) {
+    // Area-proportional rather than radius-proportional: a scope holding four
+    // times as much should look four times as big, not sixteen.
+    return Math.max(15, Math.min(38, 11 + Math.sqrt(n) * 4));
+  }
+
+  function graphText(x, y, str, cls, anchor) {
+    const t = svgEl("text", { x: x, y: y, "text-anchor": anchor || "middle" });
+    if (cls) t.setAttribute("class", cls);
+    t.textContent = str;
+    return t;
+  }
+
+  function renderGraph(list) {
+    const svg = document.getElementById("graph");
+    svg.replaceChildren();
+    if (!list.length) return;
+    const positions = list.map((b, i) => {
+      // Start at twelve o'clock so a single scope sits above the hub rather
+      // than beside it, where its label would collide with the hub's.
+      const a = -Math.PI / 2 + (i * 2 * Math.PI) / list.length;
+      return { ...b, a,
+        x: GEO.cx + GEO.ring * Math.cos(a),
+        y: GEO.cy + GEO.ring * Math.sin(a) };
+    });
+
+    for (const p of positions) {
+      const edge = svgEl("line",
+        { x1: GEO.cx, y1: GEO.cy, x2: p.x, y2: p.y });
+      edge.setAttribute("class",
+        "edge" + (openScope && openScope !== p.key ? " dim" : ""));
+      svg.appendChild(edge);
+    }
+
+    const hub = svgEl("circle", { cx: GEO.cx, cy: GEO.cy, r: 34 });
+    hub.setAttribute("class", "node hub");
+    const active = rows.filter(r => !isArchived(r)).length;
+    svg.append(hub,
+      graphText(GEO.cx, GEO.cy + 1, "You", "hub-label"),
+      graphText(GEO.cx, GEO.cy + 15, String(active), "hub-label"));
+
+    for (const p of positions) {
+      const dim = openScope && openScope !== p.key;
+      if (openScope === p.key) renderLeaves(svg, p);
+      const node = svgEl("circle",
+        { cx: p.x, cy: p.y, r: nodeRadius(p.memories.length) });
+      node.setAttribute("class", "node" + (dim ? " dim" : ""));
+      const why = svgEl("title", {});
+      why.textContent = summaryFor(p.key) ||
+        p.memories.length + " memories filed under " + p.label;
+      node.appendChild(why);
+      node.addEventListener("click", () => {
+        openScope = openScope === p.key ? null : p.key;
+        renderMap();
+      });
+      svg.appendChild(node);
+
+      // Labels sit outside the node, pushed along whichever way the node
+      // faces, so they never run back across the middle of the map.
+      const r = nodeRadius(p.memories.length);
+      const out = r + 14;
+      const lx = p.x + out * Math.cos(p.a);
+      const ly = p.y + out * Math.sin(p.a);
+      const anchor = Math.cos(p.a) > 0.3 ? "start"
+        : Math.cos(p.a) < -0.3 ? "end" : "middle";
+      const label = graphText(lx, ly, p.label, dim ? "dim" : "", anchor);
+      const n = graphText(lx, ly + 14, countLabel(p.memories.length),
+        "count" + (dim ? " dim" : ""), anchor);
+      svg.append(label, n);
+    }
+  }
+
+  function renderLeaves(svg, p) {
+    const shown = p.memories.slice(0, MAX_LEAVES);
+    // Fanned outward, away from the hub, so leaves never land on top of it.
+    const spread = Math.PI * 1.1;
+    const step = shown.length > 1 ? spread / (shown.length - 1) : 0;
+    const start = p.a - spread / 2;
+    shown.forEach((r, i) => {
+      const a = shown.length > 1 ? start + i * step : p.a;
+      const lx = p.x + GEO.leaf * Math.cos(a);
+      const ly = p.y + GEO.leaf * Math.sin(a);
+      const edge = svgEl("line", { x1: p.x, y1: p.y, x2: lx, y2: ly });
+      edge.setAttribute("class", "edge");
+      const dot = svgEl("circle", { cx: lx, cy: ly, r: 5 });
+      dot.setAttribute("class", "leaf");
+      // Native tooltip, and it honours the masking toggle — a map left open
+      // on a shared screen must not leak what the cards below are hiding.
+      const what = svgEl("title", {});
+      what.textContent = isHidden(r) ? mask(r.text) : r.text;
+      dot.appendChild(what);
+      svg.append(edge, dot);
+    });
+  }
+
+  function summaryCard(key, label, text, n) {
+    const card = document.createElement("div");
+    card.className = "scope-summary";
+    const h = document.createElement("h3");
+    h.textContent = label + " · " + countLabel(n);
+    const p = document.createElement("p");
+    p.textContent = text || (key === UNTAGGED
+      ? "Nothing has claimed these yet — run a re-tag, or add a scope that covers them."
+      : "No summary yet.");
+    card.append(h, p);
+    return card;
+  }
+
+  // The button that fills the summaries in, plus how old they are — these
+  // describe memory text that keeps changing, so their age is part of how
+  // much to trust them.
+  function renderMapBar(list) {
+    const bar = document.getElementById("map-bar");
+    bar.replaceChildren();
+    const note = document.createElement("p");
+    note.className = "muted";
+    if (!data.tagging_enabled) {
+      note.textContent = "Summaries are off on this server " +
+        "(EXTRACTION_MODE is not anthropic), so nothing is sent to a model. " +
+        "The map still shows what is filed under each scope.";
+      bar.appendChild(note);
+      return;
+    }
+    if (!list.length) {
+      note.textContent = "Nothing to map yet — once memories are stored and " +
+        "tagged, they show up here grouped by scope.";
+      bar.appendChild(note);
+      return;
+    }
+    const form = postForm("summarize", {});
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = data.summaries.generated_at
+      ? "Re-summarize my scopes" : "Summarize my scopes";
+    form.appendChild(btn);
+    note.textContent = data.summaries.generated_at
+      ? "Summarized " + fmt(data.summaries.generated_at)
+      : "One pass over your memories, describing what sits under each scope.";
+    bar.append(form, note);
+  }
+
+  function renderMap() {
+    const list = buckets();
+    if (openScope && !list.some(b => b.key === openScope)) openScope = null;
+    renderMapBar(list);
+    renderGraph(list);
+    const detail = document.getElementById("map-detail");
+    detail.replaceChildren();
+    if (!list.length) return;
+    const open = list.find(b => b.key === openScope);
+    if (!open) {
+      // Overview: every scope's summary, which is the part of the map you
+      // read rather than look at.
+      for (const b of list) {
+        detail.appendChild(
+          summaryCard(b.key, b.label, summaryFor(b.key), b.memories.length));
+      }
+      return;
+    }
+    detail.appendChild(
+      summaryCard(open.key, open.label, summaryFor(open.key),
+                  open.memories.length));
+    if (open.memories.length > MAX_LEAVES) {
+      const more = document.createElement("p");
+      more.className = "muted";
+      more.textContent = "Showing " + MAX_LEAVES + " of " +
+        open.memories.length + " as leaves; all of them are below.";
+      detail.appendChild(more);
+    }
+    for (const r of open.memories) detail.appendChild(memoryCard(r));
   }
 
   function render(filter) {
@@ -956,7 +1249,6 @@ _PAGE = """<!doctype html>
 
   loadHideState();
   loadTab();
-  renderTabs();
   renderScopes();
   renderSuggest();
   renderSweep();
@@ -965,7 +1257,7 @@ _PAGE = """<!doctype html>
   renderFilter();
   document.getElementById("hide-all").addEventListener("click", toggleHideAll);
   search.addEventListener("input", () => render(search.value));
-  render("");
+  showTab();
 </script>
 </body>
 </html>
@@ -980,6 +1272,7 @@ def render_page(
     show_logout: bool,
     sweep: Optional[dict] = None,
     suggestions: Optional[dict] = None,
+    summaries: Optional[dict] = None,
     tagging_enabled: bool = False,
     triage: Optional[dict] = None,
     triage_enabled: bool = False,
@@ -1006,6 +1299,7 @@ def render_page(
         "scopes": _scopes_to_payload(scopes),
         "sweep": sweep or {"state": "idle"},
         "suggestions": suggestions or {"proposals": [], "generated_at": ""},
+        "summaries": summaries or {"summaries": [], "generated_at": ""},
         "tagging_enabled": bool(tagging_enabled),
         "triage": triage or {"state": "idle"},
         "triage_enabled": bool(triage_enabled),
