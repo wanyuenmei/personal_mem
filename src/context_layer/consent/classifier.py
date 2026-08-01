@@ -70,8 +70,13 @@ def classifier_enabled() -> bool:
     return config.EXTRACTION_MODE == "anthropic"
 
 
-def _one_line(text: str) -> str:
-    """``text`` with every run of whitespace collapsed to a single space."""
+def one_line(text: str) -> str:
+    """``text`` with every run of whitespace collapsed to a single space.
+
+    Shared with ``discovery``, which flattens for the same reason: anything
+    written by someone else that lands in a prompt gets one line, so it cannot
+    forge structure in the list it lands in.
+    """
     return " ".join((text or "").split())
 
 
@@ -96,7 +101,7 @@ def vocabulary_lines(scopes: Sequence[ConsentScope]) -> str:
     enforces access off the resulting tags.
     """
     return "\n".join(
-        f"- {scope.key}: {_one_line(scope.description) or _one_line(scope.name)}"
+        f"- {scope.key}: {one_line(scope.description) or one_line(scope.name)}"
         for scope in scopes
     )
 

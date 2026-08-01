@@ -21,7 +21,15 @@ from starlette.responses import PlainTextResponse
 from starlette.testclient import TestClient
 
 from context_layer import config
-from context_layer.consent import RESERVED_OWNER_SLUG, ScopeRegistry, SweepStatus
+from context_layer.consent import (
+    MAX_SAMPLE_MEMORIES,
+    RESERVED_OWNER_SLUG,
+    DiscoveryFailed,
+    ProposalHolder,
+    ScopeProposal,
+    ScopeRegistry,
+    SweepStatus,
+)
 from context_layer.dashboard import DashboardApp
 from context_layer.dashboard import app as app_module
 from context_layer.memory import TenantIsolationError
@@ -879,3 +887,263 @@ def test_hide_state_lives_in_the_browser_and_the_full_text_still_ships(
     assert '"pcl.hide-details"' in page
     assert _page_data(page)["memories"][0]["text"] == "likes dark roast"
     store.update_metadata.assert_not_called()
+
+
+# --- suggesting scopes from the memories ----------------------------------
+
+
+@pytest.fixture
+def holder(monkeypatch):
+    """A fresh proposal holder per test — the real one is process-wide, so
+    tests sharing it would see each other's pending candidates."""
+    fresh = ProposalHolder()
+    monkeypatch.setattr(app_module, "get_proposal_holder", lambda: fresh)
+    return fresh
+
+
+def _install_suggester(monkeypatch, result):
+    """Make the batched discovery call return (or raise) `result`, and record
+    the rows and scopes it was handed."""
+    calls = []
+
+    def fake(rows, scopes):
+        calls.append((rows, scopes))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(app_module, "suggest_scopes", fake)
+    return calls
+
+
+def _proposal(name):
+    return ScopeProposal(name=name, description=f"about {name}", key=f"{name}__user")
+
+
+def test_a_run_holds_its_candidates_instead_of_registering_them(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    """Raw model output never becomes registry state on its own — a scope key
+    is what a future consent grant gates on."""
+    calls = _install_suggester(monkeypatch, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    assert [p.name for p in holder.get(config.DEFAULT_USER_ID).proposals] == ["travel"]
+    assert registry.all(config.DEFAULT_USER_ID) == []
+    assert len(calls) == 1
+
+
+def test_a_run_hands_discovery_the_memories_and_the_current_vocabulary(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    calls = _install_suggester(monkeypatch, [])
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("dietary", "what I eat")],
+    )
+
+    _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    rows, scopes = calls[0]
+    assert [r["id"] for r in rows] == ["m1", "m2"]
+    assert [s.key for s in scopes] == ["dietary__user"]
+    # Only the sample is used, so only the sample is read back out of the store.
+    assert capability_app.store.all.call_args.args[1] == MAX_SAMPLE_MEMORIES
+
+
+def test_only_ticked_proposals_are_registered(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    _install_suggester(monkeypatch, None)
+    holder.put(
+        config.DEFAULT_USER_ID, [_proposal("travel"), _proposal("work")]
+    )
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    registered = registry.all(config.DEFAULT_USER_ID)
+    assert [(s.key, s.owner_type, s.description) for s in registered] == [
+        ("travel__user", "user", "about travel")
+    ]
+
+
+def test_confirming_nothing_registers_nothing_and_spends_the_list(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    """Ticking none of them is a real answer — "no thanks" — not a reason to
+    keep offering the same candidates."""
+    _install_suggester(monkeypatch, None)
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "confirm"}, headers=_ORIGIN
+    )
+
+    assert registry.all(config.DEFAULT_USER_ID) == []
+    assert holder.get(config.DEFAULT_USER_ID).proposals == ()
+
+
+def test_confirm_skips_a_key_registered_since_the_proposal(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    """register() upserts, so confirming a stale proposal would overwrite the
+    description that landed under that key in the meantime."""
+    _install_suggester(monkeypatch, None)
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("travel", "written by hand")],
+    )
+
+    _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    [scope] = registry.all(config.DEFAULT_USER_ID)
+    assert scope.description == "written by hand"
+
+
+def test_a_resubmitted_checklist_cannot_register_twice(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    _install_suggester(monkeypatch, None)
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+    client = _client(capability_app)
+    body = {"action": "confirm", "key": ["travel__user"]}
+
+    client.post("/dashboard/suggest", data=body, headers=_ORIGIN)
+    registry.delete(config.DEFAULT_USER_ID, "travel__user")
+    client.post("/dashboard/suggest", data=body, headers=_ORIGIN)
+
+    assert registry.all(config.DEFAULT_USER_ID) == []
+
+
+def test_suggesting_is_refused_when_no_model_may_be_called(
+    capability_app, monkeypatch, holder
+):
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    calls = _install_suggester(monkeypatch, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 409
+    assert calls == []
+
+
+def test_confirming_does_not_need_a_model(
+    capability_app, registry, monkeypatch, holder
+):
+    """Only `run` calls out. Refusing a confirm because no model may be called
+    would strand a checklist the user is looking at, over an action that sends
+    nothing anywhere."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert [s.key for s in registry.all(config.DEFAULT_USER_ID)] == ["travel__user"]
+
+
+def test_a_failed_suggestion_call_says_so_rather_than_proposing_nothing(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    """An empty list means "no new categories in your memories"; a call that
+    never got an answer must not be able to say that."""
+    _install_suggester(monkeypatch, DiscoveryFailed("no api key"))
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "run"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 502
+    assert holder.get(config.DEFAULT_USER_ID).generated_at == ""
+
+
+def test_an_unknown_suggestion_action_is_400(capability_app, holder, tagging_on):
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "register"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 400
+
+
+def test_cross_origin_suggest_is_rejected(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    calls = _install_suggester(monkeypatch, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "run"},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403
+    assert calls == []
+
+
+def test_get_on_the_suggest_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/suggest").status_code == 405
+
+
+def test_page_renders_pending_proposals_for_ticking(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    _install_runner(monkeypatch, _FakeRunner())
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["suggestions"]["proposals"] == [
+        {"name": "travel", "description": "about travel", "key": "travel__user"}
+    ]
+
+
+def test_page_separates_a_run_that_found_nothing_from_never_having_run_one(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    _install_runner(monkeypatch, _FakeRunner())
+
+    before = _page_data(_client(capability_app).get("/dashboard").text)
+    holder.put(config.DEFAULT_USER_ID, [])
+    after = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert before["suggestions"]["generated_at"] == ""
+    assert after["suggestions"]["generated_at"] != ""
+
+
+def test_page_offers_suggestion_when_no_scopes_are_registered(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    """The cold start: with an empty vocabulary this is the only control on the
+    panel that can do anything."""
+    _install_runner(monkeypatch, _FakeRunner())
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert _page_data(resp.text)["scopes"] == []
+    assert "Suggest scopes from my memories" in resp.text

@@ -63,6 +63,8 @@ A local stdio setup has no HTTP surface; use `uv run python scripts/inspect_db.p
 
 The page reads memories and writes only consent state (scopes and tags). Editing or deleting the memories themselves from the browser is tracked as PER-56 and PER-41.
 
+**Suggest scopes from my memories** is where a brand-new account starts. Until some scopes exist there is nothing to tag memories into, so this takes one pass over your store and proposes the categories it sees in it. They arrive as a checklist and only what you tick gets registered — a scope is the thing a future sharing decision is made in, so the vocabulary stays yours to accept or throw away. Everything it registers is your own scope, never one on a connected app's behalf, and a proposal that collides with a scope you already have is dropped rather than overwriting what you wrote there. Like re-tagging below, it needs `EXTRACTION_MODE=anthropic` — in any other mode no memory is sent to a model and the panel says so.
+
 **Re-tag all memories** runs the scope classifier over your whole store in the background and reports progress as you reload; run it after registering or creating scopes, since tags are derived from your memory text and a brand-new scope starts out matching nothing. Tags you set by hand are never overwritten by it, and a tag you removed is never re-applied. The button appears only under `EXTRACTION_MODE=anthropic` — that is the one mode where classification happens at all, and the panel says so otherwise.
 
 ## Steer your AI client

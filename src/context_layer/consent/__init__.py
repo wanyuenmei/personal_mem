@@ -8,12 +8,23 @@ taxonomy (VC-86). Memories carry their tags as one ``cs_<scope-key>``
 metadata key per scope with a provenance value (VC-87) — see ``tags``.
 Tags are assigned by hand from the dashboard or derived by the ``classifier``
 and written by ``tagging``, which keeps that work off every hot path (VC-88).
+An empty vocabulary makes all of that a no-op, so ``discovery`` proposes a
+starting set of the user's own scopes from their memories, for the user to
+approve (VC-92).
 """
 
 from context_layer.consent.classifier import (
     ClassificationFailed,
     classifier_enabled,
     classify,
+)
+from context_layer.consent.discovery import (
+    MAX_SAMPLE_MEMORIES,
+    DiscoveryFailed,
+    ProposalHolder,
+    ScopeProposal,
+    get_proposal_holder,
+    suggest_scopes,
 )
 from context_layer.consent.registry import (
     DESCRIPTION_MAX_CHARS,
@@ -40,6 +51,7 @@ from context_layer.consent.tags import (
 
 __all__ = [
     "DESCRIPTION_MAX_CHARS",
+    "MAX_SAMPLE_MEMORIES",
     "PROVENANCE_LLM",
     "PROVENANCE_LLM_CLEARED",
     "PROVENANCE_USER",
@@ -48,13 +60,18 @@ __all__ = [
     "SLUG_MAX_CHARS",
     "ClassificationFailed",
     "ConsentScope",
+    "DiscoveryFailed",
+    "ProposalHolder",
+    "ScopeProposal",
     "ScopeRegistry",
     "SweepStatus",
     "active_tags",
     "classifier_enabled",
     "classify",
+    "get_proposal_holder",
     "get_sweep_runner",
     "slugify",
+    "suggest_scopes",
     "tag_key",
     "tag_new_memories",
     "tag_updates",
