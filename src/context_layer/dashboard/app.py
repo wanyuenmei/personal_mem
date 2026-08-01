@@ -27,8 +27,8 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
 - POST /dashboard/retention — memory triage (VC-94). `sweep` starts the pass
   that judges every memory on whether it would inform a later decision;
   `keep` and `archive` set one memory's state by hand, which no later pass
-  overrules. Nothing here deletes: archived memories keep their own section
-  on the page, and the only thing that changes is that search stops returning
+  overrules. Nothing here deletes: archived memories move to their own tab on
+  the page, and the only thing that changes is that search stops returning
   them.
 
 Mutations are guarded by the same principal resolution as the page plus a

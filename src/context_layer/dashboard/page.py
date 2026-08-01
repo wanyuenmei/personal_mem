@@ -19,11 +19,17 @@ Search is client-side substring filtering over the full list — fine for the
 size of a personal store, and it keeps the page a pure read of store.all()
 plus the registry.
 
-Archived memories (VC-94) are rendered too, in their own collapsed section
-below the active ones, each with the reason it was set aside and a button
-that puts it back. Nowhere else can a user see what an automatic pass decided
-about their own store, so "archived" must not mean "invisible here" — only
-"no longer returned by search".
+Archived memories (VC-94) are rendered too, behind their own tab, each with
+the reason it was set aside and a button that puts it back. Two views of one
+document, switched client-side: the main list is what a client searching this
+account would be answered from, so a set-aside memory must not sit in it —
+but nowhere else can a user see what an automatic pass decided about their
+own store, so "archived" must not mean "invisible here" either.
+
+Which tab is open lives in localStorage, for the reason the mask toggles do:
+the panels above reload this page every few seconds while a pass runs, and
+being thrown back to the main list mid-review would make the archived tab
+unusable exactly when it matters.
 
 The eye toggles that mask memory text are a display setting and nothing more:
 they live in localStorage, never in the store, and change nothing about what
@@ -213,9 +219,16 @@ _PAGE = """<!doctype html>
     color: var(--muted); font-size: .78rem;
   }
   .reason { color: var(--muted); font-size: .8rem; margin: 0 0 .35rem; }
-  #archived { margin-top: 1.5rem; }
-  #archived summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
-  #archived-list { margin-top: .6rem; }
+  #tabs { display: flex; gap: .4rem; margin-bottom: .75rem; }
+  .tab {
+    padding: .3rem .8rem; font: inherit; font-size: .85rem; cursor: pointer;
+    color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .tab:hover { color: var(--accent); }
+  .tab[aria-pressed="true"] {
+    color: var(--accent); border-color: var(--accent); background: var(--card);
+  }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
 </style>
 </head>
@@ -248,11 +261,8 @@ _PAGE = """<!doctype html>
     <div id="triage"></div>
   </section>
   <input id="search" type="search" placeholder="Search your memories&hellip;" autocomplete="off">
+  <nav id="tabs" hidden></nav>
   <main id="list"></main>
-  <details id="archived" hidden>
-    <summary id="archived-summary"></summary>
-    <div id="archived-list"></div>
-  </details>
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>
@@ -645,8 +655,8 @@ _PAGE = """<!doctype html>
     } else {
       note.textContent = "One pass over every memory, keeping what would " +
         "inform a later decision and setting the rest aside. Nothing is " +
-        "deleted \\u2014 set-aside memories stay below, and you can put any " +
-        "of them back.";
+        "deleted \\u2014 set-aside memories move to their own tab, and you " +
+        "can put any of them back.";
     }
     el.appendChild(note);
   }
@@ -721,8 +731,8 @@ _PAGE = """<!doctype html>
       archived ? "Keep" : "Set aside",
       archived
         ? "Put this back \\u2014 searches will return it again"
-        : "Stop this coming back in searches. It stays here, and nothing " +
-          "is deleted."));
+        : "Stop this coming back in searches. It moves to the set-aside " +
+          "tab, and nothing is deleted."));
     return form;
   }
 
@@ -750,45 +760,87 @@ _PAGE = """<!doctype html>
     return card;
   }
 
+  // Which view is open. Persisted for the reason the mask toggles are: the
+  // panels above reload this page every few seconds while a pass runs, and
+  // being thrown back to the main list mid-review would make the set-aside
+  // tab unusable exactly when someone is reviewing what a pass just did.
+  const TAB_KEY = "pcl.tab";
+  let tab = "active";
+
+  function loadTab() {
+    try {
+      tab = localStorage.getItem(TAB_KEY) === "archived" ? "archived" : "active";
+    } catch {
+      tab = "active";  // storage off (private mode)
+    }
+  }
+
+  function saveTab() {
+    try {
+      localStorage.setItem(TAB_KEY, tab);
+    } catch {
+      // Storage unavailable: the tabs still work for this pageview.
+    }
+  }
+
+  // Only offered once something has been set aside — until then a lone
+  // "In your context" tab is a control with nothing to switch to.
+  function renderTabs() {
+    const el = document.getElementById("tabs");
+    const archived = rows.filter(r => isArchived(r)).length;
+    el.hidden = !archived;
+    if (!archived) {
+      tab = "active";
+      return;
+    }
+    el.replaceChildren();
+    const counts = { active: rows.length - archived, archived: archived };
+    for (const [name, label] of
+         [["active", "In your context"], ["archived", "Set aside"]]) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tab";
+      btn.textContent = label + " (" + counts[name] + ")";
+      btn.setAttribute("aria-pressed", String(tab === name));
+      btn.title = name === "archived"
+        ? "Memories searches no longer return. Nothing here is deleted."
+        : "What a connected app searching your memories is answered from";
+      btn.addEventListener("click", () => {
+        tab = name;
+        saveTab();
+        renderTabs();
+        render(search.value);
+      });
+      el.appendChild(btn);
+    }
+  }
+
   function render(filter) {
     const q = filter.trim().toLowerCase();
-    const matches = r => !q || r.text.toLowerCase().includes(q);
-    // The count in the header is the ACTIVE store — what a client searching
-    // this account would actually be answered from.
-    const active = rows.filter(r => !isArchived(r));
-    const shown = active.filter(matches);
+    const wantArchived = tab === "archived";
+    const inTab = rows.filter(r => isArchived(r) === wantArchived);
+    const shown = q
+      ? inTab.filter(r => r.text.toLowerCase().includes(q))
+      : inTab;
     list.replaceChildren();
-    count.textContent = q ? shown.length + " of " + active.length
-                          : String(active.length);
+    count.textContent = q ? shown.length + " of " + inTab.length
+                          : String(inTab.length);
     if (!shown.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = active.length ? "No memories match that search."
-        : rows.length ? "Every memory is set aside — they're listed below."
+      empty.textContent = inTab.length ? "No memories match that search."
+        : wantArchived ? "Nothing has been set aside."
+        : rows.length ? "Every memory is set aside — see the other tab."
         : "Nothing stored yet — connect a client and start talking.";
       list.appendChild(empty);
-    } else {
-      for (const r of shown) list.appendChild(memoryCard(r));
+      return;
     }
-    renderArchived(rows.filter(r => isArchived(r) && matches(r)), q);
-  }
-
-  // Set-aside memories, collapsed but never hidden: they are still the user's
-  // and this page is the only place they can see what was done to them.
-  function renderArchived(shown, q) {
-    const panel = document.getElementById("archived");
-    const total = rows.filter(r => isArchived(r)).length;
-    panel.hidden = !total;
-    if (!total) return;
-    document.getElementById("archived-summary").textContent = q
-      ? shown.length + " of " + total + " set aside"
-      : total + " set aside";
-    const listEl = document.getElementById("archived-list");
-    listEl.replaceChildren();
-    for (const r of shown) listEl.appendChild(memoryCard(r));
+    for (const r of shown) list.appendChild(memoryCard(r));
   }
 
   loadHideState();
+  loadTab();
+  renderTabs();
   renderScopes();
   renderSuggest();
   renderSweep();
