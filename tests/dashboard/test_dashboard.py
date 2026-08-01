@@ -1379,3 +1379,112 @@ def test_page_carries_each_memorys_retention_state_and_reason(store, capability_
         "by_user": False,
         "reason": "one-off task detail",
     }
+
+
+# --- approving scopes fills them (VC-97) ----------------------------------
+
+
+def test_approving_scopes_starts_the_tagging_sweep(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    """Registering a scope tags nothing by itself, so a vocabulary the user
+    just approved would otherwise arrive empty."""
+    _install_suggester(monkeypatch, None)
+    runner = _install_runner(monkeypatch, _FakeRunner())
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert runner.calls == [config.DEFAULT_USER_ID]
+
+
+def test_approving_nothing_starts_no_sweep(
+    capability_app, monkeypatch, holder, tagging_on
+):
+    """A confirm that registered no new scope has nothing to re-derive, and a
+    sweep is one model call per memory."""
+    _install_suggester(monkeypatch, None)
+    runner = _install_runner(monkeypatch, _FakeRunner())
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest", data={"action": "confirm"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    assert runner.calls == []
+
+
+def test_approving_a_scope_registered_since_the_proposal_starts_no_sweep(
+    capability_app, registry, monkeypatch, holder, tagging_on
+):
+    """The collision check already drops it, so nothing changed for tags either."""
+    _install_suggester(monkeypatch, None)
+    runner = _install_runner(monkeypatch, _FakeRunner())
+    registry.register(
+        config.DEFAULT_USER_ID, owner_type="user", owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("travel", "mine, written by hand")],
+    )
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert runner.calls == []
+
+
+def test_approving_scopes_without_a_model_registers_but_starts_nothing(
+    capability_app, registry, monkeypatch, holder
+):
+    """Confirm must still work where no model may be called — it just has no
+    classifier to fill the scopes with."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    runner = _install_runner(monkeypatch, _FakeRunner())
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert [s.key for s in registry.all(config.DEFAULT_USER_ID)] == ["travel__user"]
+    assert runner.calls == []
+
+
+def test_approving_scopes_while_a_sweep_runs_is_not_an_error(
+    capability_app, registry, monkeypatch, holder, caplog, tagging_on
+):
+    """That pass started against the older vocabulary, so the scopes may go
+    untagged — the re-tag button is still there, and a refused start must not
+    turn approving them into a failure. It is logged as busy either way, so
+    "the scopes I approved are still empty" has an answer in the log."""
+    _install_suggester(monkeypatch, None)
+    _install_runner(monkeypatch, _FakeRunner(started=False))
+    holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
+    caplog.set_level(logging.INFO, logger="context_layer.access")
+
+    resp = _client(capability_app).post(
+        "/dashboard/suggest",
+        data={"action": "confirm", "key": ["travel__user"]},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert [s.key for s in registry.all(config.DEFAULT_USER_ID)] == ["travel__user"]
+    actions = [
+        json.loads(r.getMessage())["action"]
+        for r in caplog.records
+        if "dashboard_action" in r.getMessage()
+    ]
+    assert actions == ["sweep_busy", "suggest_confirm"]

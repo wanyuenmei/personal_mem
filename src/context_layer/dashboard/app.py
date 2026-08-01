@@ -21,7 +21,9 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   holds the candidates; `confirm` registers only the ones the user ticked, as
   the user's own scopes. Two actions rather than one because a scope key is
   what a future consent grant gates on: model output never reaches the
-  registry without a person in between.
+  registry without a person in between. Confirming also starts the tagging
+  sweep (VC-97) — a scope tags nothing by being registered, so the categories
+  would otherwise arrive empty.
 - POST /dashboard/retention — memory triage (VC-94). `sweep` starts the pass
   that judges every memory on whether it would inform a later decision;
   `keep` and `archive` set one memory's state by hand, which no later pass
@@ -510,6 +512,26 @@ class DashboardApp:
                     owner_slug=RESERVED_OWNER_SLUG,
                     scopes=[(p.name, p.description) for p in fresh],
                 )
+                if fresh and classifier_enabled():
+                    # Fill the vocabulary the user just approved (VC-97).
+                    # Registering a scope tags nothing by itself — tags are
+                    # derived from memory text — so without this the categories
+                    # they picked arrive empty and the only way to populate
+                    # them is a second button whose necessity is an
+                    # implementation detail. A pass already running is left
+                    # alone: it started against the older vocabulary, and the
+                    # re-tag button is still there for that case.
+                    started = get_sweep_runner().start(
+                        self.store, registry, principal.user_id
+                    )
+                    # Logged either way, like the sweep endpoint: "the scopes I
+                    # approved are still empty" is answered by whether this
+                    # line says start or busy.
+                    log_dashboard_action(
+                        principal.user_id,
+                        "sweep_start" if started else "sweep_busy",
+                        self._client_label(request),
+                    )
         else:
             return PlainTextResponse("unknown suggestion action", status_code=400)
         log_dashboard_action(

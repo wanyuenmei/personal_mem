@@ -489,7 +489,8 @@ _PAGE = """<!doctype html>
       const intro = document.createElement("p");
       intro.className = "muted";
       intro.textContent = "Suggested from your memories \\u2014 tick the ones " +
-        "you want, the rest are discarded:";
+        "you want, the rest are discarded. Adding them starts tagging your " +
+        "memories with them straight away:";
       form.appendChild(intro);
       for (const p of suggestions.proposals) {
         const row = document.createElement("label");
