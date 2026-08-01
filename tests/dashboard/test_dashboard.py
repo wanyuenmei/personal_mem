@@ -28,6 +28,9 @@ from context_layer.consent import (
     ProposalHolder,
     ScopeProposal,
     ScopeRegistry,
+    ScopeSummary,
+    SummaryFailed,
+    SummaryHolder,
     SweepStatus,
 )
 from context_layer.curation import TriageStatus
@@ -1523,3 +1526,164 @@ def test_approving_scopes_while_a_sweep_runs_is_not_an_error(
         if "dashboard_action" in r.getMessage()
     ]
     assert actions == ["sweep_busy", "suggest_confirm"]
+
+
+# --- the map view and its scope summaries ---------------------------------
+
+
+@pytest.fixture
+def summaries(monkeypatch):
+    """A fresh summary holder per test — the real one is process-wide, so
+    tests sharing it would see each other's summaries."""
+    fresh = SummaryHolder()
+    monkeypatch.setattr(app_module, "get_summary_holder", lambda: fresh)
+    return fresh
+
+
+def _install_summarizer(monkeypatch, result):
+    """Make the batched summary call return (or raise) `result`, and record
+    the rows and scopes it was handed."""
+    calls = []
+
+    def fake(rows, scopes):
+        calls.append((rows, scopes))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(app_module, "summarize_scopes", fake)
+    return calls
+
+
+def test_summarizing_holds_the_result_for_the_page(
+    capability_app, monkeypatch, summaries, tagging_on
+):
+    calls = _install_summarizer(
+        monkeypatch, [ScopeSummary(key="dietary__user", text="Your food notes.")]
+    )
+
+    resp = _client(capability_app).post("/dashboard/summarize", headers=_ORIGIN)
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    assert len(calls) == 1
+    held = summaries.get(config.DEFAULT_USER_ID)
+    assert [(s.key, s.text) for s in held.summaries] == [
+        ("dietary__user", "Your food notes.")
+    ]
+
+
+def test_summarizing_is_refused_when_no_model_may_be_called(
+    capability_app, monkeypatch, summaries
+):
+    """Outside EXTRACTION_MODE=anthropic nothing is sent to a model, so the
+    endpoint says so rather than holding an empty result that reads as "your
+    scopes have nothing in them"."""
+    monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
+    calls = _install_summarizer(monkeypatch, [])
+
+    resp = _client(capability_app).post("/dashboard/summarize", headers=_ORIGIN)
+
+    assert resp.status_code == 409
+    assert calls == []
+    assert summaries.get(config.DEFAULT_USER_ID).generated_at == ""
+
+
+def test_a_failed_summary_call_says_so_rather_than_holding_nothing(
+    capability_app, monkeypatch, summaries, tagging_on
+):
+    _install_summarizer(monkeypatch, SummaryFailed("no api key"))
+
+    resp = _client(capability_app).post("/dashboard/summarize", headers=_ORIGIN)
+
+    assert resp.status_code == 502
+    assert summaries.get(config.DEFAULT_USER_ID).generated_at == ""
+
+
+def test_re_summarizing_replaces_the_previous_answer(
+    capability_app, monkeypatch, summaries, tagging_on
+):
+    _install_summarizer(monkeypatch, [ScopeSummary(key="b__user", text="second")])
+    summaries.put(config.DEFAULT_USER_ID, [ScopeSummary(key="a__user", text="first")])
+
+    _client(capability_app).post("/dashboard/summarize", headers=_ORIGIN)
+
+    held = summaries.get(config.DEFAULT_USER_ID)
+    assert [s.key for s in held.summaries] == ["b__user"]
+
+
+def test_cross_origin_summarize_is_rejected(
+    capability_app, monkeypatch, summaries, tagging_on
+):
+    calls = _install_summarizer(monkeypatch, [])
+
+    resp = _client(capability_app).post(
+        "/dashboard/summarize", headers={"origin": "https://evil.example"}
+    )
+
+    assert resp.status_code == 403
+    assert calls == []
+
+
+def test_get_on_the_summarize_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/summarize").status_code == 405
+
+
+def test_page_carries_the_held_summaries(capability_app, summaries, tagging_on):
+    summaries.put(
+        config.DEFAULT_USER_ID,
+        [ScopeSummary(key="dietary__user", text="Your food notes.")],
+    )
+
+    data = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert data["summaries"]["summaries"] == [
+        {"key": "dietary__user", "text": "Your food notes."}
+    ]
+    assert data["summaries"]["generated_at"]
+
+
+def test_page_separates_never_summarized_from_summarized_nothing(
+    capability_app, summaries, tagging_on
+):
+    """Both render as an empty list; only one of them means "press the button"."""
+    before = _page_data(_client(capability_app).get("/dashboard").text)
+    summaries.put(config.DEFAULT_USER_ID, [])
+    after = _page_data(_client(capability_app).get("/dashboard").text)
+
+    assert before["summaries"]["generated_at"] == ""
+    assert after["summaries"]["generated_at"] != ""
+
+
+def test_page_ships_the_map_as_a_third_tab(capability_app):
+    """The graph is built client-side from the data block, so this layer can
+    only check that the view and its controls are on the page — what a click
+    draws is not observable from here.
+
+    The map is a tab on the existing bar rather than a second view switcher,
+    so what ships is a `map` entry in the tab list, not a control of its own.
+    """
+    page = _client(capability_app).get("/dashboard").text
+
+    assert 'const TABS = ["active", "archived", "map"];' in page
+    assert '<svg id="graph"' in page
+    assert "function renderGraph(" in page
+    # Untagged memories are a node too: a map that dropped them would
+    # understate how much the store holds.
+    assert 'label: "Untagged"' in page
+
+
+def test_a_summary_cannot_break_out_of_the_data_block(capability_app, summaries):
+    """Summaries are model output riding the same JSON block as memory text —
+    same escape guarantees required."""
+    summaries.put(
+        config.DEFAULT_USER_ID,
+        [ScopeSummary(key="x__user", text='</script><img src=x onerror=alert(1)>')],
+    )
+
+    page = _client(capability_app).get("/dashboard").text
+
+    assert "</script><img" not in page
+    assert _page_data(page)["summaries"]["summaries"][0]["text"] == (
+        '</script><img src=x onerror=alert(1)>'
+    )

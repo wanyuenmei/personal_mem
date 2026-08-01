@@ -16,6 +16,10 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   progress on reload. This is the rebuild path after any vocabulary change,
   and it is user-triggered by design — classification never runs on a page
   view.
+- POST /dashboard/summarize — describe what sits under each scope, for the
+  map view (VC-84). One call for the whole vocabulary, awaited inline; the
+  result is display text held in process, never stored, so pressing it again
+  just replaces the last answer.
 - POST /dashboard/suggest — the way out of an empty vocabulary (VC-92). Its
   `run` action asks a model what categories the user's memories fall into and
   holds the candidates; `confirm` registers only the ones the user ticked, as
@@ -87,11 +91,14 @@ from context_layer.consent import (
     SLUG_MAX_CHARS,
     DiscoveryFailed,
     ScopeRegistry,
+    SummaryFailed,
     classifier_enabled,
     get_proposal_holder,
+    get_summary_holder,
     get_sweep_runner,
     slugify,
     suggest_scopes,
+    summarize_scopes,
     tag_key,
 )
 from context_layer.curation import (
@@ -125,6 +132,7 @@ _POST_PATHS = (
     "/dashboard/sweep",
     "/dashboard/suggest",
     "/dashboard/retention",
+    "/dashboard/summarize",
 )
 
 
@@ -253,6 +261,7 @@ class DashboardApp:
                 user_label=principal.label, show_logout=self.oauth_mode,
                 sweep=get_sweep_runner().status(principal.user_id).as_dict(),
                 suggestions=get_proposal_holder().get(principal.user_id).as_dict(),
+                summaries=get_summary_holder().get(principal.user_id).as_dict(),
                 tagging_enabled=classifier_enabled(),
                 triage=get_triage_runner().status(principal.user_id).as_dict(),
                 triage_enabled=triage_enabled(),
@@ -290,6 +299,8 @@ class DashboardApp:
                 response = await self._suggest_action(form, principal, request)
             elif path == "/dashboard/retention":
                 response = await self._retention_action(fields, principal, request)
+            elif path == "/dashboard/summarize":
+                response = await self._summarize_action(principal, request)
             else:
                 response = await self._tags_action(fields, principal, request)
         except Exception:
@@ -597,6 +608,47 @@ class DashboardApp:
             return PlainTextResponse("no such memory", status_code=404)
         log_dashboard_action(
             principal.user_id, f"retention_{action}", self._client_label(request)
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _summarize_action(
+        self, principal: _Principal, request: Request
+    ) -> Response:
+        """Describe what sits under each of this user's scopes (VC-84).
+
+        One call for the whole vocabulary, awaited inline on a worker thread
+        like scope discovery rather than backgrounded like the sweep: there is
+        a single request to make, so a failure can be reported straight back
+        instead of through a status the page has to be reloaded to see.
+
+        Nothing here writes: summaries are display text held in process, so a
+        second press costs another call and overwrites the last answer, which
+        is exactly what "regenerate" should do.
+        """
+        if not classifier_enabled():
+            return PlainTextResponse(
+                "Scope summaries are off on this server: memories are only "
+                "sent to a model when EXTRACTION_MODE=anthropic. The map "
+                "still shows what is filed under each scope.",
+                status_code=409,
+            )
+        rows = await run_in_threadpool(self.store.all, principal.user_id)
+        scopes = await run_in_threadpool(self._registry().all, principal.user_id)
+        try:
+            summaries = await run_in_threadpool(summarize_scopes, rows, scopes)
+        except SummaryFailed:
+            logger.exception(
+                "scope summarization failed for user=%s", principal.user_id
+            )
+            return PlainTextResponse(
+                "Couldn't summarize your scopes: this server didn't get an "
+                "answer from the model. Check its API key and model settings, "
+                "then the server logs.",
+                status_code=502,
+            )
+        get_summary_holder().put(principal.user_id, summaries)
+        log_dashboard_action(
+            principal.user_id, "summarize", self._client_label(request)
         )
         return RedirectResponse(_BACK_TO_PAGE, status_code=303)
 

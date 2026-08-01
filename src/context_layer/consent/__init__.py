@@ -10,7 +10,9 @@ Tags are assigned by hand from the dashboard or derived by the ``classifier``
 and written by ``tagging``, which keeps that work off every hot path (VC-88).
 An empty vocabulary makes all of that a no-op, so ``discovery`` proposes a
 starting set of the user's own scopes from their memories, for the user to
-approve (VC-92).
+approve (VC-92). ``summary`` describes what actually sits under each scope,
+which is the thing a grant written against that scope would hand over
+(VC-84).
 """
 
 from context_layer.consent.classifier import (
@@ -33,6 +35,13 @@ from context_layer.consent.registry import (
     ConsentScope,
     ScopeRegistry,
     slugify,
+)
+from context_layer.consent.summary import (
+    ScopeSummary,
+    SummaryFailed,
+    SummaryHolder,
+    get_summary_holder,
+    summarize_scopes,
 )
 from context_layer.consent.tagging import (
     SweepStatus,
@@ -64,14 +73,19 @@ __all__ = [
     "ProposalHolder",
     "ScopeProposal",
     "ScopeRegistry",
+    "ScopeSummary",
+    "SummaryFailed",
+    "SummaryHolder",
     "SweepStatus",
     "active_tags",
     "classifier_enabled",
     "classify",
     "get_proposal_holder",
+    "get_summary_holder",
     "get_sweep_runner",
     "slugify",
     "suggest_scopes",
+    "summarize_scopes",
     "tag_key",
     "tag_new_memories",
     "tag_updates",
