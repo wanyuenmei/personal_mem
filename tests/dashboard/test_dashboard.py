@@ -848,3 +848,34 @@ def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch)
     data = _page_data(_client(capability_app).get("/dashboard").text)
 
     assert data["tagging_enabled"] is False
+
+
+# --- hiding memory details for screen sharing -----------------------------
+
+
+def test_page_offers_a_hide_toggle_for_every_memory_and_for_one(capability_app):
+    """Two eyes: the header one masks every memory at once (what you press
+    before recording), the per-card one reveals a single memory to demo.
+
+    The per-card eye exists only once the page's script has run, so all this
+    layer can check is that the control is built per row rather than merely
+    defined. What it actually does when clicked is not observable from here.
+    """
+    page = _client(capability_app).get("/dashboard").text
+
+    assert '<button id="hide-all" type="button">' in page
+    assert "eyeButton(r)" in page
+
+
+def test_hide_state_lives_in_the_browser_and_the_full_text_still_ships(
+    store, capability_app
+):
+    """Masking is a display setting, not a consent one: it is kept in
+    localStorage, the server is never told, and the text it hides is still in
+    the data block. It defends against a camera, not against the page source.
+    """
+    page = _client(capability_app).get("/dashboard").text
+
+    assert '"pcl.hide-details"' in page
+    assert _page_data(page)["memories"][0]["text"] == "likes dark roast"
+    store.update_metadata.assert_not_called()

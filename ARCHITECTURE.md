@@ -42,7 +42,7 @@ flowchart LR
 | Identity | `identity/` | `resolve_user_id` — the single tenant-isolation seam | shared client of an auth service |
 | Memory | `memory/` | `ContextStore` over mem0: `add`/`search`/`all`/`update_metadata`/`delete`/`delete_all`, each behind the tenant guard | the **memory service** |
 | Consent | `consent/` | `ScopeRegistry` — the per-user vocabulary of consent scopes, per owning party (SQLite locally, the deploy's Postgres under pgvector) — plus the `cs_*` tag/provenance vocabulary memories carry and the classifier that derives those tags out of band | the **consent service** |
-| Dashboard | `dashboard/` | the memory browser at `/dashboard`: read your memories, manage scopes and per-memory tags, re-run the classifier over the whole store; AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
+| Dashboard | `dashboard/` | the memory browser at `/dashboard`: read your memories, manage scopes and per-memory tags, re-run the classifier over the whole store, mask memory text for screen sharing; AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
 | Ingest | `ingest/` | offline backfill: export parsers → normalized format → mem0 extraction | a batch import worker |
 | Observability | `observability/` | one line of JSON per tool call: tool, tenant, client, timestamp | ships to a log/metrics sink |
 | Config | `config.py` | env-driven settings + mem0 config builder | 12-factor env per service |
