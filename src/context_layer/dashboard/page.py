@@ -18,6 +18,12 @@ into forms go through input.value / option.value assignment, never markup.
 Search is client-side substring filtering over the full list — fine for the
 size of a personal store, and it keeps the page a pure read of store.all()
 plus the registry.
+
+The eye toggles that mask memory text are a display setting and nothing more:
+they live in localStorage, never in the store, and change nothing about what
+connected apps can read. The text they mask is still in this document's data
+block, so they hide memories from a camera pointed at the screen — the case
+they exist for — not from anyone reading the page source.
 """
 
 import html
@@ -87,7 +93,11 @@ _PAGE = """<!doctype html>
     font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
   .wrap { max-width: 760px; margin: 0 auto; padding: 2rem 1rem 4rem; }
-  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 1rem; margin-bottom: .25rem;
+  }
+  h1 { font-size: 1.4rem; margin: 0; }
   h2 { font-size: 1.05rem; margin: 0 0 .35rem; }
   .who { color: var(--muted); font-size: .9rem; margin: 0 0 1.25rem; }
   .who a { color: var(--accent); }
@@ -153,13 +163,36 @@ _PAGE = """<!doctype html>
     border-radius: .5rem; padding: .8rem 1rem; margin-bottom: .6rem;
   }
   .memory p { margin: 0 0 .35rem; white-space: pre-wrap; word-break: break-word; }
+  .memory-head { display: flex; align-items: flex-start; gap: .6rem; }
+  .memory-head p { flex: 1; }
+  /* Masked text keeps the real text's line breaks and word lengths, so a card
+     holds its shape when it flips — no reflow mid-recording. */
+  .masked { color: var(--muted); user-select: none; }
+  svg.icon { width: 1.05em; height: 1.05em; display: block; flex: none; }
+  #hide-all {
+    display: inline-flex; align-items: center; gap: .35rem; flex: none;
+    padding: .25rem .6rem; font: inherit; font-size: .82rem; cursor: pointer;
+    color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: .4rem;
+  }
+  #hide-all:hover, #hide-all[aria-pressed="true"] {
+    color: var(--accent); border-color: var(--accent);
+  }
+  .eye {
+    background: none; border: none; padding: .15rem 0 0; cursor: pointer;
+    color: var(--muted);
+  }
+  .eye:hover, .eye[aria-pressed="true"] { color: var(--accent); }
   .meta { color: var(--muted); font-size: .78rem; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Your personal context</h1>
+  <div class="head">
+    <h1>Your personal context</h1>
+    <button id="hide-all" type="button"></button>
+  </div>
   <p class="who">__WHO__</p>
   <section id="scopes-panel">
     <h2>Consent scopes</h2>
@@ -225,6 +258,127 @@ _PAGE = """<!doctype html>
 
   function scopeLabel(s) {
     return s.owner === "user" ? s.name : s.name + " \\u00b7 " + s.owner;
+  }
+
+  // --- screen privacy ----------------------------------------------------
+  // Masking memory text so this page can be recorded or screenshotted in
+  // public. A display setting only: it never touches the store, so it changes
+  // nothing about what connected apps can read, and the real text is still in
+  // the data block above. It hides memories from a camera, not from devtools.
+  const HIDE_KEY = "pcl.hide-details";
+  let hideAll = false;
+  // memory id -> hidden, holding ONLY the memories that differ from hideAll.
+  let hideOverrides = new Map();
+
+  function loadHideState() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(HIDE_KEY) || "{}");
+      hideAll = saved.all === true;
+      hideOverrides = new Map(
+        Object.entries(saved.only || {}).map(([id, h]) => [id, h === true]));
+    } catch {
+      // Storage off (private mode) or a corrupt value: start fully visible.
+      hideAll = false;
+      hideOverrides = new Map();
+    }
+  }
+
+  // Persisted because the sweep panel reloads this page every 3s while a
+  // re-tag runs — without this, a recording would un-hide itself mid-take.
+  function saveHideState() {
+    try {
+      localStorage.setItem(HIDE_KEY, JSON.stringify(
+        { all: hideAll, only: Object.fromEntries(hideOverrides) }));
+    } catch {
+      // Storage unavailable: the toggles still work for this pageview.
+    }
+  }
+
+  function isHidden(r) {
+    return hideOverrides.has(r.id) ? hideOverrides.get(r.id) : hideAll;
+  }
+
+  // Same shape, no content: every non-space character becomes a bullet, so
+  // line breaks and word lengths survive and the card doesn't reflow.
+  function mask(text) {
+    return text.replace(/\\S/g, "\\u2022");
+  }
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+
+  function svgEl(tag, attrs) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const [name, value] of Object.entries(attrs)) el.setAttribute(name, value);
+    return el;
+  }
+
+  // Drawn inline rather than loaded, so the page stays a single asset-free
+  // document. Open eye = "details are showing"; struck-through = "masked".
+  function eyeIcon(hidden) {
+    const svg = svgEl("svg", {
+      "class": "icon", viewBox: "0 0 24 24", fill: "none",
+      stroke: "currentColor", "stroke-width": "2",
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+      "aria-hidden": "true",
+    });
+    if (hidden) {
+      svg.append(
+        svgEl("path", { d: "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8" +
+          "a18.45 18.45 0 0 1 5.06-5.94" }),
+        svgEl("path", { d: "M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8" +
+          "a18.5 18.5 0 0 1-2.16 3.19" }),
+        svgEl("path", { d: "M14.12 14.12a3 3 0 1 1-4.24-4.24" }),
+        svgEl("line", { x1: "1", y1: "1", x2: "23", y2: "23" }),
+      );
+    } else {
+      svg.append(
+        svgEl("path", { d: "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" }),
+        svgEl("circle", { cx: "12", cy: "12", r: "3" }),
+      );
+    }
+    return svg;
+  }
+
+  function renderHideAll() {
+    const btn = document.getElementById("hide-all");
+    const label = document.createElement("span");
+    label.textContent = hideAll ? "Show details" : "Hide details";
+    btn.replaceChildren(eyeIcon(hideAll), label);
+    btn.setAttribute("aria-pressed", String(hideAll));
+    btn.title = hideAll
+      ? "Show every memory's text again"
+      : "Mask every memory's text, for screen sharing and screenshots";
+  }
+
+  function eyeButton(r) {
+    const hidden = isHidden(r);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "eye";
+    btn.setAttribute("aria-pressed", String(hidden));
+    btn.title = hidden ? "Show this memory" : "Hide this memory";
+    btn.setAttribute("aria-label", btn.title);
+    btn.appendChild(eyeIcon(hidden));
+    btn.addEventListener("click", () => {
+      const next = !isHidden(r);
+      // Store only what differs from the master toggle, so putting a memory
+      // back to the default drops its override instead of pinning it there.
+      if (next === hideAll) hideOverrides.delete(r.id);
+      else hideOverrides.set(r.id, next);
+      saveHideState();
+      render(search.value);
+    });
+    return btn;
+  }
+
+  function toggleHideAll() {
+    hideAll = !hideAll;
+    // "Hide details" has to mean all of them: single memories revealed during
+    // the last take must not stay revealed into this one.
+    hideOverrides.clear();
+    saveHideState();
+    renderHideAll();
+    render(search.value);
   }
 
   function renderScopes() {
@@ -393,21 +547,29 @@ _PAGE = """<!doctype html>
     for (const r of shown) {
       const card = document.createElement("div");
       card.className = "memory";
+      const hidden = isHidden(r);
       const text = document.createElement("p");
-      text.textContent = r.text;
+      text.textContent = hidden ? mask(r.text) : r.text;
+      if (hidden) text.className = "masked";
+      const head = document.createElement("div");
+      head.className = "memory-head";
+      head.append(text, eyeButton(r));
       const meta = document.createElement("div");
       meta.className = "meta";
       meta.textContent = [fmt(r.created_at), r.source && "from " + r.source]
         .filter(Boolean).join(" · ");
-      card.append(text, meta);
+      card.append(head, meta);
       const tagRow = tagRowFor(r);
       if (tagRow.childNodes.length) card.appendChild(tagRow);
       list.appendChild(card);
     }
   }
 
+  loadHideState();
   renderScopes();
   renderSweep();
+  renderHideAll();
+  document.getElementById("hide-all").addEventListener("click", toggleHideAll);
   search.addEventListener("input", () => render(search.value));
   render("");
 </script>
