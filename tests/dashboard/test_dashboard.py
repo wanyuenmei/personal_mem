@@ -390,6 +390,41 @@ def test_removed_tags_read_as_untagged_in_the_payload(store, capability_app):
     assert '"tags": {}' in resp.text
 
 
+def test_page_offers_a_scope_filter_over_the_tags_it_already_carries(
+    store, registry, capability_app
+):
+    """Narrowing the list to a set of scopes is client-side over the data
+    block, so this layer can only check that the control and its predicate
+    are on the page and that the tags they read are in the payload — what a
+    click does is not observable from here.
+    """
+    registry.register(
+        config.DEFAULT_USER_ID,
+        owner_type="user",
+        owner_slug=RESERVED_OWNER_SLUG,
+        scopes=[("dietary", "food preferences")],
+    )
+    store.all.return_value = [
+        {
+            "id": "m1",
+            "memory": "allergic to peanuts",
+            "created_at": "2026-07-01T00:00:00Z",
+            "metadata": {"cs_dietary__user": "llm"},
+        }
+    ]
+
+    page = _client(capability_app).get("/dashboard").text
+
+    assert '<div id="filter"></div>' in page
+    assert "matchesScopes(r)" in page
+    # "Nothing has claimed this yet" is a bucket you can filter for, and it
+    # is not a scope — so it can't come from the registry payload.
+    assert '"Untagged"' in page
+    # Keyed by SCOPE key, not the cs_ metadata key — which is what lets the
+    # filter match a memory's tags straight against the registry payload.
+    assert _page_data(page)["memories"][0]["tags"] == {"dietary__user": "llm"}
+
+
 def test_scope_description_cannot_break_out_of_the_data_block(
     store, registry, capability_app
 ):

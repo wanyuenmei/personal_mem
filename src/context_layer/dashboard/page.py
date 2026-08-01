@@ -17,7 +17,13 @@ into forms go through input.value / option.value assignment, never markup.
 
 Search is client-side substring filtering over the full list — fine for the
 size of a personal store, and it keeps the page a pure read of store.all()
-plus the registry.
+plus the registry. Narrowing to a set of scopes (VC-95) is client-side for
+the same reason and needs nothing new: every memory's tags and the whole
+registry are already in the data block, so it is a predicate over what the
+page holds, not another read. It is deliberately not a store query — mem0's
+pgvector filter builder cannot match inside a JSON array, which is why tags
+are one payload key per scope to begin with. The chips narrow within whichever
+tab is open and count against it, so they describe the list they sit above.
 
 Archived memories (VC-94) are rendered too, behind their own tab, each with
 the reason it was set aside and a button that puts it back. Two views of one
@@ -229,6 +235,17 @@ _PAGE = """<!doctype html>
   .tab[aria-pressed="true"] {
     color: var(--accent); border-color: var(--accent); background: var(--card);
   }
+  #filter { display: flex; flex-wrap: wrap; gap: .3rem; margin: 0 0 1rem; }
+  .filter-chip {
+    font: inherit; font-size: .8rem; cursor: pointer; padding: .1rem .6rem;
+    color: var(--muted); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .filter-chip:hover { color: var(--accent); }
+  .filter-chip[aria-pressed="true"] {
+    color: var(--accent); border-color: var(--accent);
+  }
+  .filter-chip .n { opacity: .65; }
   .empty { color: var(--muted); padding: 2rem 0; text-align: center; }
 </style>
 </head>
@@ -262,6 +279,7 @@ _PAGE = """<!doctype html>
   </section>
   <input id="search" type="search" placeholder="Search your memories&hellip;" autocomplete="off">
   <nav id="tabs" hidden></nav>
+  <div id="filter"></div>
   <main id="list"></main>
 </div>
 <script type="application/json" id="data">__DATA__</script>
@@ -665,9 +683,8 @@ _PAGE = """<!doctype html>
     const tags = r.tags || {};
     const tagRow = document.createElement("div");
     tagRow.className = "tags";
-    for (const key of Object.keys(tags)) {
+    for (const key of scopeKeysOf(r)) {
       const s = scopeByKey.get(key);
-      if (!s) continue; // scope no longer registered: reads as untagged
       const chip = document.createElement("span");
       chip.className = tags[key] === "llm" ? "tag llm" : "tag";
       chip.title = tags[key] === "llm" ? "Tagged automatically" : "Tagged by you";
@@ -703,6 +720,99 @@ _PAGE = """<!doctype html>
     if (!ts) return "";
     const d = new Date(ts);
     return isNaN(d) ? ts : d.toLocaleString();
+  }
+
+  // --- narrowing the list to a set of scopes -----------------------------
+
+  // Which scopes the list is narrowed to. Empty means "everything", not
+  // "nothing" — an untouched filter must never hide the store.
+  const selectedScopes = new Set();
+
+  // Stands for "nothing has claimed this yet". Worth filtering for in its own
+  // right: it is how you find what a sweep missed, or what a new scope should
+  // cover. Not a registry key, and can't collide with one — a scope key is
+  // built from slugified characters and never contains a NUL.
+  const UNTAGGED = "\\u0000untagged";
+
+  // The scopes a memory actually reads as. A tag whose scope is no longer
+  // registered counts as untagged here, exactly as it already does on the card.
+  function scopeKeysOf(r) {
+    return Object.keys(r.tags || {}).filter(k => scopeByKey.has(k));
+  }
+
+  function matchesScopes(r) {
+    if (!selectedScopes.size) return true;
+    const keys = scopeKeysOf(r);
+    if (!keys.length) return selectedScopes.has(UNTAGGED);
+    // OR, not AND: most memories carry a single scope, so an intersection
+    // would answer nearly every multi-select with an empty list.
+    return keys.some(k => selectedScopes.has(k));
+  }
+
+  function filterChip(key, label, n) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "filter-chip";
+    btn.setAttribute("aria-pressed", selectedScopes.has(key) ? "true" : "false");
+    const name = document.createElement("span");
+    name.textContent = label;
+    const num = document.createElement("span");
+    num.className = "n";
+    num.textContent = " " + n;
+    btn.append(name, num);
+    btn.addEventListener("click", () => {
+      if (selectedScopes.has(key)) selectedScopes.delete(key);
+      else selectedScopes.add(key);
+      renderFilter();
+      render(search.value);
+    });
+    return btn;
+  }
+
+  function renderFilter() {
+    const el = document.getElementById("filter");
+    el.replaceChildren();
+    // Counts are over the OPEN TAB — the chips describe the list they sit
+    // above, so switching to Set aside recounts against what's in there. They
+    // deliberately ignore the text search: they say how much sits under each
+    // scope, which shouldn't flicker while someone types.
+    const wantArchived = tab === "archived";
+    const counts = new Map();
+    let untagged = 0;
+    for (const r of rows.filter(r => isArchived(r) === wantArchived)) {
+      const keys = scopeKeysOf(r);
+      if (!keys.length) untagged++;
+      for (const k of keys) counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    // Scopes something is actually filed under — a registered scope matching
+    // nothing would be a chip whose only outcome is an empty list, and the
+    // panel above already says it exists — PLUS anything currently selected,
+    // even where this tab holds none of it. A selection survives a tab switch,
+    // so without that second clause switching to a tab that doesn't have the
+    // selected scope would narrow the list with no chip to show for it and no
+    // way to undo it: an untouched filter hiding the store, which is the one
+    // thing this control must never do.
+    const chips = scopes
+      .filter(s => counts.has(s.key) || selectedScopes.has(s.key))
+      .map(s => [s.key, scopeLabel(s), counts.get(s.key) || 0]);
+    if (untagged || selectedScopes.has(UNTAGGED)) {
+      chips.push([UNTAGGED, "Untagged", untagged]);
+    }
+    // One bucket narrows to itself, so the row is only worth drawing when
+    // there is a choice to make — or a selection to see and undo.
+    if (chips.length < 2 && !selectedScopes.size) return;
+    for (const [key, label, n] of chips) el.appendChild(filterChip(key, label, n));
+    if (!selectedScopes.size) return;
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "filter-chip";
+    clear.textContent = "Clear";
+    clear.addEventListener("click", () => {
+      selectedScopes.clear();
+      renderFilter();
+      render(search.value);
+    });
+    el.appendChild(clear);
   }
 
   function isArchived(r) {
@@ -809,6 +919,8 @@ _PAGE = """<!doctype html>
         tab = name;
         saveTab();
         renderTabs();
+        // The chips count what's in the open tab, so they move with it.
+        renderFilter();
         render(search.value);
       });
       el.appendChild(btn);
@@ -819,19 +931,23 @@ _PAGE = """<!doctype html>
     const q = filter.trim().toLowerCase();
     const wantArchived = tab === "archived";
     const inTab = rows.filter(r => isArchived(r) === wantArchived);
-    const shown = q
-      ? inTab.filter(r => r.text.toLowerCase().includes(q))
-      : inTab;
+    const shown = inTab.filter(r =>
+      (!q || r.text.toLowerCase().includes(q)) && matchesScopes(r));
+    // Whether the list is answering a question or just showing the tab —
+    // which is what decides between "3 of 142" and a bare total.
+    const narrowed = Boolean(q) || selectedScopes.size > 0;
     list.replaceChildren();
-    count.textContent = q ? shown.length + " of " + inTab.length
-                          : String(inTab.length);
+    count.textContent = narrowed ? shown.length + " of " + inTab.length
+                                 : String(inTab.length);
     if (!shown.length) {
       const empty = document.createElement("p");
       empty.className = "empty";
-      empty.textContent = inTab.length ? "No memories match that search."
-        : wantArchived ? "Nothing has been set aside."
-        : rows.length ? "Every memory is set aside — see the other tab."
-        : "Nothing stored yet — connect a client and start talking.";
+      empty.textContent = !inTab.length
+        ? (wantArchived ? "Nothing has been set aside."
+           : rows.length ? "Every memory is set aside — see the other tab."
+           : "Nothing stored yet — connect a client and start talking.")
+        : selectedScopes.size && !q ? "Nothing here is filed under that."
+        : "No memories match that search.";
       list.appendChild(empty);
       return;
     }
@@ -846,6 +962,7 @@ _PAGE = """<!doctype html>
   renderSweep();
   renderTriage();
   renderHideAll();
+  renderFilter();
   document.getElementById("hide-all").addEventListener("click", toggleHideAll);
   search.addEventListener("input", () => render(search.value));
   render("");
