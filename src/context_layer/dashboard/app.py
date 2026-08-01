@@ -91,11 +91,11 @@ from context_layer.consent import (
     SLUG_MAX_CHARS,
     DiscoveryFailed,
     ScopeRegistry,
+    ScopeTaggingHandler,
     SummaryFailed,
     classifier_enabled,
     get_proposal_holder,
     get_summary_holder,
-    get_sweep_runner,
     slugify,
     suggest_scopes,
     summarize_scopes,
@@ -105,11 +105,12 @@ from context_layer.curation import (
     SOURCE_USER,
     STATE_ARCHIVED,
     STATE_KEEP,
-    get_triage_runner,
+    RetentionHandler,
     state_updates,
     triage_enabled,
 )
 from context_layer.dashboard.page import render_page
+from context_layer.jobs import RunStore
 from context_layer.memory import ContextStore, TenantIsolationError
 from context_layer.observability import log_dashboard_action, log_dashboard_view
 
@@ -124,6 +125,11 @@ _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 # URL (/…/dashboard/scopes or /…/dashboard/tags), so any capability-token
 # prefix in the browser's real URL survives the round trip.
 _BACK_TO_PAGE = "../dashboard"
+
+# Named off the handlers so a kind can never drift between the endpoint that
+# enqueues a run and the worker that executes it.
+_SCOPE_KIND = ScopeTaggingHandler.kind
+_RETENTION_KIND = RetentionHandler.kind
 
 _AUTH_PATHS = ("/dashboard/login", "/dashboard/callback", "/dashboard/logout")
 _POST_PATHS = (
@@ -174,6 +180,7 @@ class DashboardApp:
         oauth_mode: bool,
         workos_client: Any = None,
         registry: Optional[ScopeRegistry] = None,
+        runs: Optional[RunStore] = None,
     ) -> None:
         self.app = app
         self.store = store
@@ -184,6 +191,9 @@ class DashboardApp:
         # Injectable for tests; defaults to the process-wide registry the
         # register_scopes tool writes to, so the page shows what tools registered.
         self._scope_registry = registry
+        # Injectable for tests; the durable store the sweep buttons enqueue
+        # into and the page reads runs back out of.
+        self._run_store = runs
 
     async def __call__(self, scope, receive, send) -> None:
         path = scope.get("path", "") if scope["type"] == "http" else ""
@@ -259,11 +269,11 @@ class DashboardApp:
             render_page(
                 rows, scopes,
                 user_label=principal.label, show_logout=self.oauth_mode,
-                sweep=get_sweep_runner().status(principal.user_id).as_dict(),
+                sweep=self._run_state(principal.user_id, _SCOPE_KIND),
                 suggestions=get_proposal_holder().get(principal.user_id).as_dict(),
                 summaries=get_summary_holder().get(principal.user_id).as_dict(),
                 tagging_enabled=classifier_enabled(),
-                triage=get_triage_runner().status(principal.user_id).as_dict(),
+                triage=self._run_state(principal.user_id, _RETENTION_KIND),
                 triage_enabled=triage_enabled(),
             )
         )
@@ -441,8 +451,8 @@ class DashboardApp:
                 "to a model. You can still tag memories yourself.",
                 status_code=409,
             )
-        started = get_sweep_runner().start(
-            self.store, self._registry(), principal.user_id
+        started = await run_in_threadpool(
+            self._runs().enqueue, principal.user_id, _SCOPE_KIND
         )
         log_dashboard_action(
             principal.user_id,
@@ -532,8 +542,8 @@ class DashboardApp:
                     # implementation detail. A pass already running is left
                     # alone: it started against the older vocabulary, and the
                     # re-tag button is still there for that case.
-                    started = get_sweep_runner().start(
-                        self.store, registry, principal.user_id
+                    started = await run_in_threadpool(
+                        self._runs().enqueue, principal.user_id, _SCOPE_KIND
                     )
                     # Logged either way, like the sweep endpoint: "the scopes I
                     # approved are still empty" is answered by whether this
@@ -576,7 +586,9 @@ class DashboardApp:
                     "to one. You can still set memories aside yourself.",
                     status_code=409,
                 )
-            started = get_triage_runner().start(self.store, principal.user_id)
+            started = await run_in_threadpool(
+                self._runs().enqueue, principal.user_id, _RETENTION_KIND
+            )
             log_dashboard_action(
                 principal.user_id,
                 "retention_sweep_start" if started else "retention_sweep_busy",
@@ -663,6 +675,26 @@ class DashboardApp:
         source = request.headers.get("origin") or request.headers.get("referer") or ""
         host = (request.headers.get("host") or "").strip().lower()
         return bool(host) and urlsplit(source).netloc.lower() == host
+
+    def _runs(self) -> RunStore:
+        """The durable run store both sweep buttons enqueue into.
+
+        Injectable for tests; built from config otherwise, onto the same
+        backend the scope registry uses.
+        """
+        if self._run_store is None:
+            self._run_store = RunStore.from_config()
+        return self._run_store
+
+    def _run_state(self, user_id: str, kind: str) -> dict:
+        """What the page shows about a pass: the stored run, or an idle shape.
+
+        Read rather than remembered — a run this process never started, or one
+        a previous process was killed halfway through, reads exactly the same
+        here as one running on this worker right now.
+        """
+        run = self._runs().get(user_id, kind)
+        return run.as_dict() if run else {"state": "idle"}
 
     def _registry(self) -> ScopeRegistry:
         if self._scope_registry is None:

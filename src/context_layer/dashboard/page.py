@@ -611,6 +611,13 @@ _PAGE = """<!doctype html>
   // The re-tag control plus whatever the last/current sweep is doing. Status
   // is in-process on the server, so "running" advances by reloading the page
   // rather than by polling an endpoint that doesn't exist.
+  // Memories a run walked past because they were already judged against the
+  // current vocabulary. Worth saying: it is the difference between a pass that
+  // cost a model call per memory and one that cost almost nothing.
+  function skippedNote(s) {
+    return s.skipped ? " (" + s.skipped + " already up to date)" : "";
+  }
+
   function renderSweep() {
     const el = document.getElementById("sweep");
     const note = document.createElement("p");
@@ -632,7 +639,10 @@ _PAGE = """<!doctype html>
       return;
     }
     const s = data.sweep || {};
-    const running = s.state === "running";
+    // Queued and running are both "in flight" to the person watching: the run
+    // is a durable row, so it is happening whether or not a worker has reached
+    // it yet — and whether or not it is THIS process doing the work.
+    const running = s.state === "running" || s.state === "queued";
     const form = postForm("sweep", {});
     const btn = document.createElement("button");
     btn.type = "submit";
@@ -641,8 +651,9 @@ _PAGE = """<!doctype html>
     form.appendChild(btn);
     el.appendChild(form);
     if (running) {
-      note.textContent = s.total
-        ? "Classifying " + s.processed + " of " + s.total + "\\u2026"
+      note.textContent = s.state === "queued" ? "Queued\\u2026"
+        : s.total ? "Classifying " + s.processed + " of " + s.total +
+            skippedNote(s) + "\\u2026"
         : "Starting\\u2026";
       scheduleReload();
     } else if (s.state === "done" && !s.scope_count) {
@@ -652,7 +663,7 @@ _PAGE = """<!doctype html>
         "it again now that you have some.";
     } else if (s.state === "done") {
       note.textContent = "Last run: " + s.changed + " of " + s.total +
-        " memories updated" +
+        " memories updated" + skippedNote(s) +
         (s.failed ? " \\u00b7 " + s.failed + " could not be tagged " +
           "(see the server logs)" : "") +
         " \\u00b7 " + fmt(s.finished_at);
@@ -687,7 +698,9 @@ _PAGE = """<!doctype html>
       return;
     }
     const t = data.triage || {};
-    const running = t.state === "running";
+    // Same as the tagging panel: a queued run is already happening, it just
+    // has not been picked up yet.
+    const running = t.state === "running" || t.state === "queued";
     const form = postForm("retention", { action: "sweep" });
     const btn = document.createElement("button");
     btn.type = "submit";
@@ -696,8 +709,9 @@ _PAGE = """<!doctype html>
     form.appendChild(btn);
     el.appendChild(form);
     if (running) {
-      note.textContent = t.total
-        ? "Reviewing " + t.processed + " of " + t.total + "\\u2026"
+      note.textContent = t.state === "queued" ? "Queued\\u2026"
+        : t.total ? "Reviewing " + t.processed + " of " + t.total +
+            skippedNote(t) + "\\u2026"
         : "Starting\\u2026";
       scheduleReload();
     } else if (t.state === "done") {
@@ -708,6 +722,7 @@ _PAGE = """<!doctype html>
         t.restored ? t.restored + " put back" : "",
       ].filter(Boolean).join(", ") || "nothing changed";
       note.textContent = "Last run over " + t.total + " memories: " + moved +
+        skippedNote(t) +
         (t.failed ? " \\u00b7 " + t.failed + " could not be reviewed " +
           "(see the server logs)" : "") +
         " \\u00b7 " + fmt(t.finished_at);

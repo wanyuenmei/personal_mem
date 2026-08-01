@@ -12,6 +12,7 @@ import time
 import pytest
 
 from context_layer.curation import (
+    POLICY_VERSION,
     REASON_KEY,
     SOURCE_KEY,
     SOURCE_LLM,
@@ -19,16 +20,15 @@ from context_layer.curation import (
     STATE_ARCHIVED,
     STATE_KEEP,
     STATE_KEY,
+    RetentionHandler,
     TriageFailed,
     Verdict,
     retention_updates,
     sweep,
-    triage_rows,
+    triage_one,
 )
-from context_layer.curation.sweep import (
-    TRIAGE_ERROR_ALL_FAILED,
-    TriageRunner,
-)
+from context_layer.curation.sweep import SWEPT_KEY
+from context_layer.jobs import fingerprint_of
 
 _ARCHIVE = Verdict(state=STATE_ARCHIVED, reason="one-off task detail")
 _KEEP = Verdict(state=STATE_KEEP)
@@ -132,192 +132,115 @@ def test_a_memory_the_user_set_aside_is_never_put_back_by_a_pass():
     assert retention_updates(metadata, _KEEP) == {}
 
 
-# --- triage_rows ----------------------------------------------------------
+# --- judging one memory ---------------------------------------------------
 
 
-def test_triage_rows_writes_through_the_tenant_guarded_primitive(stub_triage):
-    stub_triage(_ARCHIVE)
-    store = _FakeStore()
-
-    counts = triage_rows(store, "u1", [{"id": "m1", "memory": "the file is at /tmp/x"}])
-
-    assert (counts.archived, counts.restored, counts.failed) == (1, 0, 0)
-    memory_id, updates, user_id = store.updates[0]
-    assert (memory_id, user_id) == ("m1", "u1")
-    assert updates[STATE_KEY] == STATE_ARCHIVED
-
-
-def test_archived_and_restored_are_counted_apart(stub_triage):
-    """A pass that set forty memories aside and one that put forty back are
-    the same size and opposite events."""
-    stub_triage(_KEEP)
-    store = _FakeStore()
-
-    counts = triage_rows(
-        store, "u1",
-        [
-            {"id": "m1", "memory": "a", "metadata": {STATE_KEY: STATE_ARCHIVED}},
-            {"id": "m2", "memory": "b"},
-        ],
-    )
-
-    assert (counts.archived, counts.restored, counts.failed) == (0, 1, 0)
-    assert [call[0] for call in store.updates] == ["m1"]
-
-
-def test_rows_without_text_or_id_are_skipped(stub_triage):
-    stub_triage(_ARCHIVE)
-    store = _FakeStore()
-
-    counts = triage_rows(
-        store, "u1", [{"id": "m1", "memory": ""}, {"id": "", "memory": "x"}]
-    )
-
-    assert (counts.archived, counts.failed) == (0, 0)
-    assert store.updates == []
-
-
-def test_a_failed_triage_is_counted_not_read_as_keep(monkeypatch):
+def test_a_failed_triage_raises_rather_than_reading_as_keep(monkeypatch):
     """"Keep" is what a tidy store looks like, so a call that never answered
-    must not be able to report it."""
+    must not be able to report it. Raising is what makes the worker count the
+    memory as failed instead of silently leaving it kept."""
     monkeypatch.setattr(sweep, "triage", _raising_triage({"a"}))
     store = _FakeStore()
 
-    counts = triage_rows(store, "u1", [{"id": "m1", "memory": "a"}])
+    with pytest.raises(TriageFailed):
+        triage_one(store, "u1", {"id": "m1", "memory": "a"}, "fp1")
 
-    assert (counts.archived, counts.restored, counts.failed) == (0, 0, 1)
     assert store.updates == []
 
 
-def test_one_memorys_failure_does_not_abandon_the_rest(monkeypatch):
-    monkeypatch.setattr(sweep, "triage", _raising_triage({"a"}))
-    store = _FakeStore()
-
-    counts = triage_rows(
-        store, "u1", [{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}]
-    )
-
-    assert (counts.archived, counts.failed) == (1, 1)
-    assert [call[0] for call in store.updates] == ["m2"]
-
-
-def test_a_failed_write_is_counted_too(stub_triage):
+def test_a_failed_write_raises_too(stub_triage):
+    """A write that lost a race with a delete is the same fact from the user's
+    side as a failed call: this memory did not get judged."""
     stub_triage(_ARCHIVE)
     store = _FakeStore()
-    original = store.update_metadata
 
     def flaky(memory_id, updates, user_id=None):
-        if memory_id == "m1":
-            raise RuntimeError("write lost a race with a delete")
-        return original(memory_id, updates, user_id)
+        raise RuntimeError("write lost a race with a delete")
 
     store.update_metadata = flaky
 
-    counts = triage_rows(
-        store, "u1", [{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}]
-    )
-
-    assert (counts.archived, counts.failed) == (1, 1)
+    with pytest.raises(RuntimeError):
+        triage_one(store, "u1", {"id": "m1", "memory": "a"}, "fp1")
 
 
-# --- the user-triggered pass ----------------------------------------------
+
+# --- the pass, as the job worker sees it ----------------------------------
+#
+# The lifecycle around this — claiming, resuming, counting, the all-failed
+# rule — is the worker's and is tested in tests/jobs. What is curation-specific
+# is what the pass judges against and what judging one memory means.
 
 
-def test_a_pass_walks_every_memory_and_reports_done(stub_triage):
+def test_the_pass_reads_archived_memories_back_in(stub_triage):
+    """This is the pass that can retract its own earlier verdict; skipping
+    archived memories would make every archive permanent until a human
+    intervened."""
+    store = _FakeStore([
+        {"id": "m1", "memory": "kept"},
+        {"id": "m2", "memory": "aside", "metadata": {STATE_KEY: STATE_ARCHIVED}},
+    ])
+
+    assert len(RetentionHandler().prepare(store, "u1").rows) == 2
+
+
+def test_what_the_pass_judges_against_is_the_policy_not_a_vocabulary():
+    """Triage asks a fixed question, so bumping the policy version is how a
+    changed prompt asks for the whole store to be re-judged."""
+    handler = RetentionHandler()
+    store = _FakeStore([])
+
+    mine = handler.prepare(store, "u1").fingerprint
+    assert mine == handler.prepare(store, "someone-else").fingerprint
+    assert mine == fingerprint_of(POLICY_VERSION)
+
+
+def test_a_memory_judged_under_the_current_policy_is_current():
+    handler = RetentionHandler()
+
+    assert handler.is_current({"metadata": {SWEPT_KEY: "fp"}}, "fp") is True
+    assert handler.is_current({"metadata": {SWEPT_KEY: "old"}}, "fp") is False
+    assert handler.is_current({"metadata": {}}, "fp") is False
+
+
+def test_judging_a_memory_stamps_it_even_when_the_verdict_changes_nothing(
+    stub_triage,
+):
+    """A keep verdict on an unarchived memory moves nothing — but it has been
+    judged, and the stamp is what stops the next pass paying to ask again."""
+    stub_triage(_KEEP)
+    store = _FakeStore([])
+
+    counted = triage_one(store, "u1", {"id": "m1", "memory": "x"}, "fp1")
+
+    assert counted == {}
+    assert store.updates == [("m1", {SWEPT_KEY: "fp1"}, "u1")]
+
+
+def test_setting_a_memory_aside_counts_both_ways(stub_triage):
+    """``changed`` is what every kind of pass reports; the archived/restored
+    split is what this one owes the user."""
     stub_triage(_ARCHIVE)
-    store = _FakeStore([{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}])
-    runner = TriageRunner()
+    store = _FakeStore([])
 
-    assert runner.start(store, "u1") is True
-    assert _wait_for(lambda: runner.status("u1").state == "done")
+    counted = triage_one(store, "u1", {"id": "m1", "memory": "x"}, "fp1")
 
-    status = runner.status("u1")
-    assert (status.total, status.processed, status.archived) == (2, 2, 2)
-    assert status.finished_at
-    assert {call[0] for call in store.updates} == {"m1", "m2"}
+    assert counted == {"changed": 1, "archived": 1}
+    assert store.updates[0][1][STATE_KEY] == STATE_ARCHIVED
 
 
-def test_a_pass_reads_archived_memories_back_in(stub_triage):
-    """Skipping them would make every archive permanent until a human
-    intervened — the pass has to be able to retract its own verdict."""
+def test_putting_one_back_counts_as_restored(stub_triage):
     stub_triage(_KEEP)
-    store = _FakeStore(
-        [{"id": "m1", "memory": "a", "metadata": {STATE_KEY: STATE_ARCHIVED}}]
-    )
-    runner = TriageRunner()
+    store = _FakeStore([])
+    row = {"id": "m1", "memory": "x", "metadata": {STATE_KEY: STATE_ARCHIVED}}
 
-    runner.start(store, "u1")
-    assert _wait_for(lambda: runner.status("u1").state == "done")
+    counted = triage_one(store, "u1", row, "fp1")
 
-    assert runner.status("u1").restored == 1
+    assert counted == {"changed": 1, "restored": 1}
 
 
-def test_a_second_pass_while_one_runs_is_refused(monkeypatch):
-    """One click, one pass: an impatient user must not be able to multiply the
-    API calls a pass over the whole store costs."""
-    release = {"go": False}
-    monkeypatch.setattr(
-        sweep, "triage",
-        lambda text: (_wait_for(lambda: release["go"], 5.0), _KEEP)[1],
-    )
-    store = _FakeStore([{"id": "m1", "memory": "a"}])
-    runner = TriageRunner()
+def test_a_row_without_text_or_id_is_not_judged_at_all(stub_triage):
+    store = _FakeStore([])
 
-    assert runner.start(store, "u1") is True
-    assert _wait_for(lambda: runner.is_running("u1"))
-    assert runner.start(store, "u1") is False
-
-    release["go"] = True
-    assert _wait_for(lambda: runner.status("u1").state == "done")
-
-
-def test_pass_status_is_per_user(stub_triage):
-    stub_triage(_KEEP)
-    store = _FakeStore([{"id": "m1", "memory": "a"}])
-    runner = TriageRunner()
-
-    runner.start(store, "u1")
-    assert _wait_for(lambda: runner.status("u1").state == "done")
-
-    assert runner.status("u2").state == "idle"
-
-
-def test_a_pass_that_could_review_nothing_does_not_report_success(monkeypatch):
-    """Every memory failing is a broken triage call, not a store that was
-    already exactly right — the two used to look identical."""
-    monkeypatch.setattr(sweep, "triage", _raising_triage({"a", "b"}))
-    store = _FakeStore([{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}])
-    runner = TriageRunner()
-
-    runner.start(store, "u1")
-    assert _wait_for(lambda: runner.status("u1").state == "error")
-
-    status = runner.status("u1")
-    assert status.error == TRIAGE_ERROR_ALL_FAILED
-    assert (status.total, status.archived, status.failed) == (2, 0, 2)
-    assert status.finished_at
-
-
-def test_a_partly_failing_pass_still_reports_what_landed(monkeypatch):
-    monkeypatch.setattr(sweep, "triage", _raising_triage({"a"}))
-    store = _FakeStore([{"id": "m1", "memory": "a"}, {"id": "m2", "memory": "b"}])
-    runner = TriageRunner()
-
-    runner.start(store, "u1")
-    assert _wait_for(lambda: runner.status("u1").state == "done")
-
-    status = runner.status("u1")
-    assert (status.processed, status.archived, status.failed) == (2, 1, 1)
-    assert status.error == ""
-
-
-def test_a_failing_pass_reports_error_not_a_stuck_running():
-    class _Broken:
-        def all(self, user_id, limit=1000):
-            raise RuntimeError("backend down")
-
-    runner = TriageRunner()
-    runner.start(_Broken(), "u1")
-
-    assert _wait_for(lambda: runner.status("u1").state == "error")
-    assert runner.status("u1").error == "RuntimeError"
+    assert triage_one(store, "u1", {"id": "m1", "memory": ""}, "fp1") == {}
+    assert triage_one(store, "u1", {"id": "", "memory": "x"}, "fp1") == {}
+    assert store.updates == []

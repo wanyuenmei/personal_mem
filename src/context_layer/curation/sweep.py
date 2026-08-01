@@ -1,8 +1,8 @@
 """Where a triage verdict actually becomes a memory's retention state.
 
-One entry point: the user-triggered pass over the whole store, from the
-dashboard's POST /dashboard/retention. It walks every memory on a background
-thread and publishes progress the page can render, like the scope sweep.
+One entry point: the user-triggered pass over the whole store, enqueued by
+the dashboard's POST /dashboard/retention and executed by the job worker as a
+durable run, like the scope sweep.
 
 There is deliberately NO on-write pass to match the scope classifier's. A
 memory that was just written has no track record to judge — the user said
@@ -19,20 +19,29 @@ recomputable from the text, reversible, never the source of truth — except
 where the user has set it themselves, which is intent and survives every
 sweep in both directions.
 
-The thread-plus-status machinery here mirrors
-``consent.tagging.SweepRunner`` closely, and stays a separate implementation
-on purpose: the two report different things (memories set aside and restored
-versus tags changed), and a shared base class would tie the consent and
-curation layers together through a third module for the sake of forty lines
-of locking — against the whole point of keeping each layer extractable on its
-own.
+This module used to carry its own thread-and-status machinery, mirroring the
+scope sweep's, and said so on purpose: the two report different things, and a
+shared base class was not worth tying the consent and curation layers together
+through a third module for forty lines of locking.
+
+That reasoning was right about the layering and wrong about the size. What is
+shared is not locking — it is a run that survives the process executing it: a
+persisted record, a claim, a heartbeat, resumption after a crash, and the rule
+that already-judged memories are skipped rather than paid for again (VC-98).
+Duplicating that is duplicating the hard part, and it means fixing the same
+bug twice.
+
+The layering concern still holds, and is answered rather than ignored: the
+shared machinery lives in ``jobs``, a layer of its own that knows nothing
+about memories, and this module depends on it the way it already depends on
+the store. What stays here is what is genuinely curation's — the question
+triage asks, and the fact that setting a memory aside and putting one back are
+opposite events worth counting apart.
 """
 
 import logging
-import threading
-from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from typing import Callable, Optional, Sequence
+from typing import Optional
 
 from context_layer.curation.retention import (
     SOURCE_LLM,
@@ -44,13 +53,21 @@ from context_layer.curation.retention import (
     state_updates,
 )
 from context_layer.curation.triage import Verdict, triage
+from context_layer.jobs.runs import fingerprint_of
+from context_layer.jobs.worker import Pass
 
 logger = logging.getLogger("context_layer.curation.sweep")
 
-# TriageStatus.error when every memory in a pass failed on its own — nearly
-# always credentials or model configuration rather than the memories. The
-# dashboard branches on this exact value to say so.
-TRIAGE_ERROR_ALL_FAILED = "all_failed"
+# What triage judges against. There is no per-user vocabulary here as there is
+# for scopes — the question the pass asks is fixed — so this stands in for one:
+# bump it when the prompt changes and the next pass re-judges the whole store
+# instead of skipping everything it has already seen.
+POLICY_VERSION = "triage-v1"
+
+# Records the policy a memory was last judged under, so a repeat pass can skip
+# it. Sits beside the retention keys rather than among them: it says when the
+# question was last asked, not what the answer was.
+SWEPT_KEY = "retention_swept_fp"
 
 
 def _now() -> str:
@@ -88,179 +105,69 @@ def retention_updates(metadata: Optional[dict], verdict: Verdict) -> dict[str, s
     return {}
 
 
-@dataclass(frozen=True)
-class TriageCounts:
-    """How one pass over a batch of rows went.
+def triage_one(
+    store, user_id: str, row: dict, fingerprint: str
+) -> dict[str, int]:
+    """Judge one memory and write what changed; returns what it counted as.
 
-    ``archived`` and ``restored`` are counted apart rather than summed into
-    "changed": a pass that sets 40 memories aside and one that puts 40 back
-    are the same size and opposite events, and the user is owed the
-    difference. ``failed`` counts memories that got no decision at all,
-    whatever the reason — the triage call failed, or the write did.
+    The write always happens when there is something to judge, even when the
+    verdict changes nothing, because it also carries the stamp saying this
+    memory has been judged under the current policy. That stamp is what lets
+    the next pass skip it rather than pay for the same verdict again.
+
+    Raises whatever the triage call or the store raised — the worker counts
+    the failure and carries on to the next memory.
+    """
+    memory_id = str(row.get("id") or "")
+    text = str(row.get("memory") or row.get("text") or "")
+    if not memory_id or not text:
+        return {}
+    changes = retention_updates(row.get("metadata"), triage(text))
+    store.update_metadata(memory_id, {**changes, SWEPT_KEY: fingerprint}, user_id)
+    if not changes:
+        return {}
+    moved = "archived" if changes[STATE_KEY] == STATE_ARCHIVED else "restored"
+    # Counted both ways: ``changed`` is what every kind of pass reports, and
+    # the archived/restored split is what this one owes the user — 40 memories
+    # set aside and 40 put back are the same size and opposite events.
+    return {"changed": 1, moved: 1}
+
+
+class RetentionHandler:
+    """What a triage run is, for the job worker that executes it.
+
+    Only the part specific to retention: what the pass is judging against,
+    which memories it covers, which have already been judged, and what judging
+    one does. The lifecycle around that — claim, heartbeat, counters, resume
+    after a crash — is the worker's, and identical to the scope sweep's.
     """
 
-    archived: int = 0
-    restored: int = 0
-    failed: int = 0
+    kind = "retention"
 
+    def prepare(self, store, user_id: str) -> Pass:
+        """Settle the attempt: the policy it judges under, and every memory.
 
-def triage_rows(
-    store,
-    user_id: str,
-    rows: Sequence[dict],
-    *,
-    on_progress: Optional[Callable[[], None]] = None,
-) -> TriageCounts:
-    """Judge each row and write what changed; returns the tally.
-
-    One memory's failure — a call that failed, a write that lost a race with a
-    delete — is logged and counted rather than abandoning the rest of the pass.
-    """
-    archived = 0
-    restored = 0
-    failed = 0
-    for row in rows:
-        memory_id = str(row.get("id") or "")
-        text = str(row.get("memory") or row.get("text") or "")
-        try:
-            if memory_id and text:
-                metadata = row.get("metadata")
-                updates = retention_updates(metadata, triage(text))
-                if updates:
-                    store.update_metadata(memory_id, updates, user_id)
-                    if updates[STATE_KEY] == STATE_ARCHIVED:
-                        archived += 1
-                    else:
-                        restored += 1
-        except Exception:
-            failed += 1
-            logger.exception("failed to triage memory %r for user=%s", memory_id, user_id)
-        if on_progress is not None:
-            on_progress()
-    return TriageCounts(archived=archived, restored=restored, failed=failed)
-
-
-@dataclass
-class TriageStatus:
-    """What the dashboard shows about a user's triage pass.
-
-    In-process and deliberately not persisted, like the scope sweep's status:
-    it describes a running thread in THIS worker, a restart genuinely has no
-    pass running, and losing it costs nothing because the retention states it
-    produced are in the store and the pass is re-runnable at will.
-    """
-
-    state: str = "idle"  # idle | running | done | error
-    total: int = 0
-    processed: int = 0
-    archived: int = 0
-    restored: int = 0
-    failed: int = 0
-    started_at: str = ""
-    finished_at: str = ""
-    error: str = ""
-
-    def as_dict(self) -> dict:
-        return asdict(self)
-
-
-class TriageRunner:
-    """Per-user triage threads plus the status the page renders.
-
-    At most one pass per user at a time: a second POST while one is running is
-    a no-op rather than a second walk over the store, so an impatient click
-    can't double the API calls. Statuses are keyed by user id, so one tenant's
-    pass is never visible to — or blocked by — another's.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._statuses: dict[str, TriageStatus] = {}
-
-    def status(self, user_id: str) -> TriageStatus:
-        with self._lock:
-            return self._statuses.get(user_id) or TriageStatus()
-
-    def is_running(self, user_id: str) -> bool:
-        return self.status(user_id).state == "running"
-
-    def start(self, store, user_id: str) -> bool:
-        """Kick off a pass; False if one is already running for this user.
-
-        Claims the slot under the lock before the thread starts, so two
-        near-simultaneous POSTs can't both see "idle" and both spawn.
+        Archived memories are read back in — this is the pass that can retract
+        its own earlier verdict, and skipping them would make every archive
+        permanent until a human intervened.
         """
-        with self._lock:
-            existing = self._statuses.get(user_id)
-            if existing is not None and existing.state == "running":
-                return False
-            self._statuses[user_id] = TriageStatus(state="running", started_at=_now())
-        thread = threading.Thread(
-            target=self._run,
-            args=(store, user_id),
-            name=f"memory-triage-{user_id}",
-            daemon=True,
+        return Pass(
+            fingerprint=fingerprint_of(POLICY_VERSION),
+            rows=store.all(user_id),
+            detail={"archived": 0, "restored": 0},
         )
-        thread.start()
-        return True
 
-    def _update(self, user_id: str, **fields) -> None:
-        with self._lock:
-            status = self._statuses.get(user_id)
-            if status is None:
-                return
-            for name, value in fields.items():
-                setattr(status, name, value)
+    def is_current(self, row: dict, fingerprint: str) -> bool:
+        return (row.get("metadata") or {}).get(SWEPT_KEY) == fingerprint
 
-    def _bump_processed(self, user_id: str) -> None:
-        with self._lock:
-            status = self._statuses.get(user_id)
-            if status is not None:
-                status.processed += 1
-
-    def _run(self, store, user_id: str) -> None:
-        try:
-            # Archived memories are read back in too: this is the pass that can
-            # retract its own earlier verdict, and skipping them would make
-            # every archive permanent until a human intervened.
-            rows = store.all(user_id)
-            self._update(user_id, total=len(rows))
-            counts = triage_rows(
-                store, user_id, rows, on_progress=lambda: self._bump_processed(user_id)
-            )
-            # Every memory failing is a broken triage call, not a store that
-            # was already exactly right; anything less still reports what landed.
-            everything_failed = bool(rows) and counts.failed == len(rows)
-            self._update(
-                user_id,
-                state="error" if everything_failed else "done",
-                archived=counts.archived,
-                restored=counts.restored,
-                failed=counts.failed,
-                error=TRIAGE_ERROR_ALL_FAILED if everything_failed else "",
-                finished_at=_now(),
-            )
-        except Exception as exc:
-            logger.exception("triage pass failed for user=%s", user_id)
-            self._update(
-                user_id, state="error", error=type(exc).__name__, finished_at=_now()
-            )
-
-
-_runner = TriageRunner()
-
-
-def get_triage_runner() -> TriageRunner:
-    """The process-wide runner the dashboard starts and reads."""
-    return _runner
+    def handle(self, store, user_id: str, row: dict, plan: Pass):
+        return triage_one(store, user_id, row, plan.fingerprint)
 
 
 __all__ = [
-    "TRIAGE_ERROR_ALL_FAILED",
-    "TriageCounts",
-    "TriageRunner",
-    "TriageStatus",
-    "get_triage_runner",
+    "POLICY_VERSION",
+    "SWEPT_KEY",
+    "RetentionHandler",
     "retention_updates",
-    "triage_rows",
+    "triage_one",
 ]

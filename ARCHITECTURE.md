@@ -19,6 +19,8 @@ flowchart LR
     tools --> consent["consent/<br/>ScopeRegistry · scope classifier<br/>· scope discovery · scope summaries"]
     tools --> obs["observability/<br/>access log"]
     dash["dashboard/<br/>memory browser + scope manager + triage"] --> store
+    dash --> jobs["jobs/<br/>durable sweep runs + worker"]
+    jobs --> store
     dash --> consent
     dash --> curation["curation/<br/>retention state · triage pass"]
     dash --> obs
@@ -28,7 +30,8 @@ flowchart LR
   end
 
   mem0 --> vs["vector store<br/>Chroma (local) / pgvector (deploy)"]
-  consent --> regdb["scope registry<br/>SQLite (local) / Postgres (deploy)"]
+  consent --> regdb["scope registry + sweep runs<br/>SQLite (local) / Postgres (deploy)"]
+  jobs --> regdb
   app_py["app.py — composition root"] -.builds.-> app
   config["config.py — settings"] -.reads env.-> app
 ```
@@ -46,6 +49,7 @@ flowchart LR
 | Consent | `consent/` | `ScopeRegistry` — the per-user vocabulary of consent scopes, per owning party (SQLite locally, the deploy's Postgres under pgvector) — plus the `cs_*` tag/provenance vocabulary memories carry, the classifier that derives those tags out of band, the discovery pass that proposes a starting vocabulary from the user's own memories for them to approve, and the summaries describing what actually sits under each scope | the **consent service** |
 | Curation | `curation/` | the retention state each memory carries (kept or archived, with provenance and the reason it was set aside) plus the out-of-band triage pass that decides it — the thing that keeps `search_memory` answering from what still informs a decision | part of the **memory service** |
 | Dashboard | `dashboard/` | the memory browser at `/dashboard`: read your memories as a list or as a mind map grouped by scope, manage scopes and per-memory tags, suggest scopes from your memories, re-run the classifier over the whole store, review what is still worth keeping and set memories aside or put them back, mask memory text for screen sharing; AuthKit browser sign-in under OAuth, the token path under capability mode | the web frontend |
+| Jobs | `jobs/` | durable runs for the long passes over a store: the persisted record, the worker that claims and resumes one after a crash, and the handler seam each feature implements — the lifecycle is shared, the judgement is not | a background job service |
 | Ingest | `ingest/` | offline backfill: export parsers → normalized format → mem0 extraction | a batch import worker |
 | Observability | `observability/` | one line of JSON per tool call: tool, tenant, client, timestamp | ships to a log/metrics sink |
 | Config | `config.py` | env-driven settings + mem0 config builder | 12-factor env per service |
