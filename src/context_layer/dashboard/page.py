@@ -146,12 +146,21 @@ _PAGE = """<!doctype html>
   .muted { color: var(--muted); font-size: .85rem; margin: .25rem 0; }
   #sweep { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
            margin-top: .6rem; }
-  #sweep button {
+  #sweep button, #suggest button {
     padding: .25rem .7rem; font-size: .82rem; cursor: pointer; color: var(--fg);
     background: var(--bg); border: 1px solid var(--border); border-radius: .4rem;
   }
   #sweep button:disabled { cursor: default; opacity: .6; }
   #sweep .muted { margin: 0; }
+  #suggest { margin-top: .6rem; }
+  #suggest .muted { margin: .35rem 0 0; }
+  form.proposals { display: block; margin: 0; }
+  label.proposal {
+    display: flex; align-items: flex-start; gap: .4rem;
+    font-size: .85rem; margin: .3rem 0;
+  }
+  label.proposal input { margin: .3rem 0 0; }
+  label.proposal .what { color: var(--muted); }
   #search {
     width: 100%; padding: .6rem .8rem; font-size: 1rem; color: var(--fg);
     background: var(--card); border: 1px solid var(--border);
@@ -197,6 +206,7 @@ _PAGE = """<!doctype html>
   <section id="scopes-panel">
     <h2>Consent scopes</h2>
     <div id="scopes"></div>
+    <div id="suggest"></div>
     <div id="sweep"></div>
     <details class="new-scope">
       <summary>Create your own scope</summary>
@@ -422,6 +432,65 @@ _PAGE = """<!doctype html>
     }
   }
 
+  // The way out of an empty vocabulary: one pass over the memories proposing
+  // categories. What comes back is the model's, so it renders as a checklist
+  // of UNticked boxes — a scope key is what a future consent grant gates on,
+  // and pre-ticking would make "add them all" the one-click default.
+  function renderSuggest() {
+    const el = document.getElementById("suggest");
+    // Same gate as tagging: outside EXTRACTION_MODE=anthropic no memory is
+    // sent to a model, and renderSweep already says so.
+    if (!data.tagging_enabled) return;
+    const suggestions = data.suggestions;
+    if (suggestions.proposals.length) {
+      const form = postForm("suggest", { action: "confirm" });
+      form.className = "proposals";
+      const intro = document.createElement("p");
+      intro.className = "muted";
+      intro.textContent = "Suggested from your memories \\u2014 tick the ones " +
+        "you want, the rest are discarded:";
+      form.appendChild(intro);
+      for (const p of suggestions.proposals) {
+        const row = document.createElement("label");
+        row.className = "proposal";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.name = "key";
+        box.value = p.key;
+        const name = document.createElement("span");
+        name.textContent = p.name;
+        row.append(box, name);
+        if (p.description) {
+          const what = document.createElement("span");
+          what.className = "what";
+          what.textContent = "\\u2014 " + p.description;
+          row.appendChild(what);
+        }
+        form.appendChild(row);
+      }
+      const add = document.createElement("button");
+      add.type = "submit";
+      add.textContent = "Add ticked scopes";
+      form.appendChild(add);
+      el.appendChild(form);
+      return;
+    }
+    const form = postForm("suggest", { action: "run" });
+    const btn = document.createElement("button");
+    btn.type = "submit";
+    btn.textContent = "Suggest scopes from my memories";
+    form.appendChild(btn);
+    const note = document.createElement("p");
+    note.className = "muted";
+    // A run that produced nothing has to read differently from never having
+    // run one, or pressing the button again looks like the fix.
+    note.textContent = suggestions.generated_at
+      ? "That pass found no categories you don't already have."
+      : "One pass over your memories, proposing categories you can then " +
+        "tick to add. Nothing is added without you ticking it.";
+    el.append(form, note);
+  }
+
   // The re-tag control plus whatever the last/current sweep is doing. Status
   // is in-process on the server, so "running" advances by reloading the page
   // rather than by polling an endpoint that doesn't exist.
@@ -437,10 +506,10 @@ _PAGE = """<!doctype html>
       return;
     }
     // Tags ARE scopes, so with none registered the button's only possible
-    // outcome is a no-op. Lead with the step that unblocks it instead. Worded
-    // to not simply echo the empty-scopes line renderScopes just put above.
+    // outcome is a no-op. The control that fills the vocabulary sits directly
+    // above; point at it rather than offering a button that can't do anything.
     if (!scopes.length) {
-      note.textContent = "Nothing to tag into yet \\u2014 create a scope first, " +
+      note.textContent = "Nothing to tag into yet \\u2014 add some scopes above, " +
         "then come back and re-tag your memories.";
       el.appendChild(note);
       return;
@@ -567,6 +636,7 @@ _PAGE = """<!doctype html>
 
   loadHideState();
   renderScopes();
+  renderSuggest();
   renderSweep();
   renderHideAll();
   document.getElementById("hide-all").addEventListener("click", toggleHideAll);
@@ -585,14 +655,16 @@ def render_page(
     user_label: str,
     show_logout: bool,
     sweep: Optional[dict] = None,
+    suggestions: Optional[dict] = None,
     tagging_enabled: bool = False,
 ) -> str:
     """Render the full memory-browser document for one user's rows + scopes.
 
     ``sweep`` is the in-process status of that user's re-tagging run (see
-    consent.tagging.SweepStatus) and ``tagging_enabled`` says whether the
-    classifier can run here at all — the panel explains the off state rather
-    than offering a button that would do nothing.
+    consent.tagging.SweepStatus), ``suggestions`` the scope candidates waiting
+    for them to tick (consent.discovery.ProposalSet), and ``tagging_enabled``
+    says whether a model can be called here at all — the panel explains the
+    off state rather than offering buttons that would do nothing.
     """
     who = f"{html.escape(user_label)} &middot; <span id=\"count\"></span> memories"
     if show_logout:
@@ -601,6 +673,7 @@ def render_page(
         "memories": _rows_to_payload(rows),
         "scopes": _scopes_to_payload(scopes),
         "sweep": sweep or {"state": "idle"},
+        "suggestions": suggestions or {"proposals": [], "generated_at": ""},
         "tagging_enabled": bool(tagging_enabled),
     }
     return _PAGE.replace("__WHO__", who).replace("__DATA__", _json_for_script(data))

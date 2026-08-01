@@ -16,6 +16,12 @@ per-memory tags (memory edit/delete from the browser are PER-56 / PER-41):
   progress on reload. This is the rebuild path after any vocabulary change,
   and it is user-triggered by design — classification never runs on a page
   view.
+- POST /dashboard/suggest — the way out of an empty vocabulary (VC-92). Its
+  `run` action asks a model what categories the user's memories fall into and
+  holds the candidates; `confirm` registers only the ones the user ticked, as
+  the user's own scopes. Two actions rather than one because a scope key is
+  what a future consent grant gates on: model output never reaches the
+  registry without a person in between.
 
 Mutations are guarded by the same principal resolution as the page plus a
 same-origin check (Origin, falling back to Referer, must name the host the
@@ -54,6 +60,7 @@ from typing import Any, Optional
 from urllib.parse import urlsplit
 
 from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import FormData
 from starlette.requests import Request
 from starlette.responses import (
     HTMLResponse,
@@ -65,14 +72,18 @@ from starlette.responses import (
 from context_layer import config
 from context_layer.consent import (
     DESCRIPTION_MAX_CHARS,
+    MAX_SAMPLE_MEMORIES,
     PROVENANCE_USER,
     PROVENANCE_USER_REMOVED,
     RESERVED_OWNER_SLUG,
     SLUG_MAX_CHARS,
+    DiscoveryFailed,
     ScopeRegistry,
     classifier_enabled,
+    get_proposal_holder,
     get_sweep_runner,
     slugify,
+    suggest_scopes,
     tag_key,
 )
 from context_layer.dashboard.page import render_page
@@ -92,7 +103,12 @@ _SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
 _BACK_TO_PAGE = "../dashboard"
 
 _AUTH_PATHS = ("/dashboard/login", "/dashboard/callback", "/dashboard/logout")
-_POST_PATHS = ("/dashboard/scopes", "/dashboard/tags", "/dashboard/sweep")
+_POST_PATHS = (
+    "/dashboard/scopes",
+    "/dashboard/tags",
+    "/dashboard/sweep",
+    "/dashboard/suggest",
+)
 
 
 def _json_safe(data: dict) -> dict:
@@ -219,6 +235,7 @@ class DashboardApp:
                 rows, scopes,
                 user_label=principal.label, show_logout=self.oauth_mode,
                 sweep=get_sweep_runner().status(principal.user_id).as_dict(),
+                suggestions=get_proposal_holder().get(principal.user_id).as_dict(),
                 tagging_enabled=classifier_enabled(),
             )
         )
@@ -248,6 +265,10 @@ class DashboardApp:
                 response = await self._scopes_action(fields, principal, request)
             elif path == "/dashboard/sweep":
                 response = await self._sweep_action(principal, request)
+            elif path == "/dashboard/suggest":
+                # The raw form, not `fields`: the confirm checklist submits one
+                # `key` per ticked proposal, which flattening to a dict loses.
+                response = await self._suggest_action(form, principal, request)
             else:
                 response = await self._tags_action(fields, principal, request)
         except Exception:
@@ -395,6 +416,85 @@ class DashboardApp:
             principal.user_id,
             "sweep_start" if started else "sweep_busy",
             self._client_label(request),
+        )
+        return RedirectResponse(_BACK_TO_PAGE, status_code=303)
+
+    async def _suggest_action(
+        self, form: FormData, principal: _Principal, request: Request
+    ) -> Response:
+        """Propose scopes from this user's memories, then register the ticked ones.
+
+        ``run`` makes one model call over a sample of the store and holds the
+        candidates; ``confirm`` registers the ticked ones and drops the rest
+        (see ``consent.discovery`` for why those are two acts and not one).
+
+        Unlike the sweep this is a single call, so it runs inline on a worker
+        thread and a failure can be reported straight back rather than through
+        a status the page has to reload for.
+        """
+        action = str(form.get("action") or "")
+        registry = self._registry()
+        holder = get_proposal_holder()
+        if action == "run":
+            # Gating `run` alone, not the whole endpoint: confirm registers
+            # what the user ticked and calls nothing, so refusing it with "no
+            # memory is sent to a model" would be false and would strand a
+            # checklist the user is already looking at.
+            if not classifier_enabled():
+                return PlainTextResponse(
+                    "Scope suggestions are off on this server: memories are "
+                    "only sent to a model when EXTRACTION_MODE=anthropic. You "
+                    "can still create scopes yourself.",
+                    status_code=409,
+                )
+            # Only the sample is used, so don't drag the whole store back for it.
+            rows = await run_in_threadpool(
+                self.store.all, principal.user_id, MAX_SAMPLE_MEMORIES
+            )
+            scopes = await run_in_threadpool(registry.all, principal.user_id)
+            try:
+                proposals = await run_in_threadpool(suggest_scopes, rows, scopes)
+            except DiscoveryFailed:
+                logger.exception(
+                    "scope suggestion failed for user=%s", principal.user_id
+                )
+                return PlainTextResponse(
+                    "Couldn't suggest scopes: this server didn't get an answer "
+                    "from the model. Check its API key and model settings, then "
+                    "the server logs.",
+                    status_code=502,
+                )
+            holder.put(principal.user_id, proposals)
+        elif action == "confirm":
+            ticked = {str(key).strip() for key in form.getlist("key")}
+            # Taken, not read: the checklist is spent either way, and clearing
+            # it in the same step stops a double-submitted form registering
+            # twice. Anything left unticked is simply discarded.
+            pending = holder.take(principal.user_id)
+            chosen = [p for p in pending.proposals if p.key in ticked]
+            if chosen:
+                # Re-checked against the registry rather than trusted from
+                # generation time: register() upserts, so a proposal whose key
+                # got registered in between would silently overwrite the
+                # description that landed there first.
+                taken = {
+                    scope.key
+                    for scope in await run_in_threadpool(
+                        registry.all, principal.user_id
+                    )
+                }
+                fresh = [p for p in chosen if p.key not in taken]
+                await run_in_threadpool(
+                    registry.register,
+                    principal.user_id,
+                    owner_type="user",
+                    owner_slug=RESERVED_OWNER_SLUG,
+                    scopes=[(p.name, p.description) for p in fresh],
+                )
+        else:
+            return PlainTextResponse("unknown suggestion action", status_code=400)
+        log_dashboard_action(
+            principal.user_id, f"suggest_{action}", self._client_label(request)
         )
         return RedirectResponse(_BACK_TO_PAGE, status_code=303)
 
