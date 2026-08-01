@@ -16,8 +16,11 @@ def test_search_filters_only_by_user(fake_mem0):
 
     results = store.search("coffee", user_id="alice", limit=3)
 
+    # top_k is the caller's limit times the over-fetch factor: archived
+    # memories are dropped after mem0 ranks them (VC-94), so search has to ask
+    # for more rows than it means to return.
     fake_mem0.search.assert_called_once_with(
-        "coffee", filters={"user_id": "alice"}, top_k=3
+        "coffee", filters={"user_id": "alice"}, top_k=12
     )
     assert results == [{"memory": "likes coffee"}]
 
@@ -43,6 +46,77 @@ def test_search_normalizes_non_list_non_dict_response(fake_mem0):
     store = ContextStore()
 
     assert store.search("q", user_id="alice") == []
+
+
+def test_search_leaves_out_archived_memories(fake_mem0):
+    """The point of triage (VC-94): a memory that was set aside stops
+    competing for the few slots a caller asked for."""
+    fake_mem0.search.return_value = {
+        "results": [
+            {"memory": "likes coffee"},
+            {"memory": "the file was at /tmp/x",
+             "metadata": {"retention_state": "archived"}},
+        ]
+    }
+    store = ContextStore()
+
+    assert store.search("q", user_id="alice") == [{"memory": "likes coffee"}]
+
+
+def test_search_keeps_memories_no_triage_has_looked_at(fake_mem0):
+    """Absent retention metadata is every memory written before triage
+    existed; none of them may vanish from search because of it."""
+    fake_mem0.search.return_value = {
+        "results": [{"memory": "likes coffee", "metadata": {"source": "claude"}}]
+    }
+    store = ContextStore()
+
+    assert len(store.search("q", user_id="alice")) == 1
+
+
+def test_search_returns_at_most_the_requested_limit(fake_mem0):
+    """Over-fetching must not leak extra rows to the caller."""
+    fake_mem0.search.return_value = {"results": [{"memory": str(i)} for i in range(12)]}
+    store = ContextStore()
+
+    assert len(store.search("q", user_id="alice", limit=3)) == 3
+
+
+def test_a_limit_below_one_returns_nothing_without_a_query(fake_mem0):
+    """Archived rows are dropped by slicing to the limit, so a negative one
+    would quietly return everything but the last few results."""
+    store = ContextStore()
+
+    assert store.search("q", user_id="alice", limit=0) == []
+    assert store.search("q", user_id="alice", limit=-1) == []
+    assert not fake_mem0.search.called
+
+
+def test_a_large_limit_is_never_capped_below_itself(fake_mem0):
+    """The over-fetch ceiling bounds the EXTRA rows. A limit above it must
+    still ask for everything the caller wanted."""
+    fake_mem0.search.return_value = {"results": []}
+    store = ContextStore()
+
+    store.search("q", user_id="alice", limit=500)
+
+    assert fake_mem0.search.call_args.kwargs["top_k"] == 500
+
+
+def test_search_can_be_asked_for_archived_memories_too(fake_mem0):
+    """The read that has to see everything — and it asks mem0 for exactly the
+    limit, since nothing gets dropped afterwards."""
+    fake_mem0.search.return_value = {
+        "results": [{"memory": "x", "metadata": {"retention_state": "archived"}}]
+    }
+    store = ContextStore()
+
+    results = store.search("q", user_id="alice", limit=3, include_archived=True)
+
+    fake_mem0.search.assert_called_once_with(
+        "q", filters={"user_id": "alice"}, top_k=3
+    )
+    assert len(results) == 1
 
 
 def test_add_passes_text_and_user_through(fake_mem0):

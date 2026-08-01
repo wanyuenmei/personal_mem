@@ -30,6 +30,7 @@ from context_layer.consent import (
     ScopeRegistry,
     SweepStatus,
 )
+from context_layer.curation import TriageStatus
 from context_layer.dashboard import DashboardApp
 from context_layer.dashboard import app as app_module
 from context_layer.memory import TenantIsolationError
@@ -1147,3 +1148,234 @@ def test_page_offers_suggestion_when_no_scopes_are_registered(
 
     assert _page_data(resp.text)["scopes"] == []
     assert "Suggest scopes from my memories" in resp.text
+
+
+# --- memory triage: the retention endpoint (VC-94) ------------------------
+
+
+class _FakeTriageRunner:
+    """Stands in for the process-wide TriageRunner: records start() calls and
+    reports whatever status a test wants the page to render."""
+
+    def __init__(self, started=True, status=None):
+        self.started = started
+        self._status = status or TriageStatus()
+        self.calls = []
+
+    def start(self, store, user_id):
+        self.calls.append(user_id)
+        return self.started
+
+    def status(self, user_id):
+        return self._status
+
+
+@pytest.fixture
+def triage_on(monkeypatch):
+    """A server where triage is configured to run."""
+    monkeypatch.setattr(app_module, "triage_enabled", lambda: True)
+
+
+def _install_triage_runner(monkeypatch, runner):
+    monkeypatch.setattr(app_module, "get_triage_runner", lambda: runner)
+    return runner
+
+
+def test_triage_sweep_starts_a_background_pass(capability_app, monkeypatch, triage_on):
+    runner = _install_triage_runner(monkeypatch, _FakeTriageRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention", data={"action": "sweep"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "../dashboard"
+    assert runner.calls == [config.DEFAULT_USER_ID]
+
+
+def test_triage_sweep_is_refused_when_no_model_may_be_called(
+    capability_app, monkeypatch
+):
+    monkeypatch.setattr(app_module, "triage_enabled", lambda: False)
+    runner = _install_triage_runner(monkeypatch, _FakeTriageRunner())
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention", data={"action": "sweep"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 409
+    assert runner.calls == []
+
+
+def test_a_triage_pass_already_running_is_logged_not_an_error(
+    capability_app, monkeypatch, caplog, triage_on
+):
+    _install_triage_runner(monkeypatch, _FakeTriageRunner(started=False))
+    caplog.set_level(logging.INFO, logger="context_layer.access")
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention", data={"action": "sweep"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 303
+    [record] = [r for r in caplog.records if "dashboard_action" in r.getMessage()]
+    assert json.loads(record.getMessage())["action"] == "retention_sweep_busy"
+
+
+def test_setting_a_memory_aside_writes_user_provenance(store, capability_app):
+    """What the user did by hand has to be recognizable as theirs, or the next
+    pass would treat it as its own work and re-decide it."""
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "archive", "memory_id": "m1"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    memory_id, updates, user_id = store.update_metadata.call_args[0]
+    assert (memory_id, user_id) == ("m1", config.DEFAULT_USER_ID)
+    assert updates["retention_state"] == "archived"
+    assert updates["retention_source"] == "user"
+
+
+def test_keeping_a_memory_writes_the_kept_state_and_clears_the_reason(
+    store, capability_app
+):
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "keep", "memory_id": "m1"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    updates = store.update_metadata.call_args[0][1]
+    assert updates["retention_state"] == "keep"
+    assert updates["retention_reason"] == ""
+
+
+def test_setting_a_memory_aside_does_not_need_a_model(
+    store, capability_app, monkeypatch
+):
+    """Only the automatic pass calls out; refusing the manual control on a
+    server with no model would leave the user unable to tidy their own store."""
+    monkeypatch.setattr(app_module, "triage_enabled", lambda: False)
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "archive", "memory_id": "m1"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 303
+    assert store.update_metadata.called
+
+
+def test_retention_write_on_anothers_memory_is_404_not_an_error_leak(
+    store, capability_app
+):
+    store.update_metadata.side_effect = TenantIsolationError("not yours")
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "archive", "memory_id": "someone-elses"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+
+
+def test_retention_write_on_an_absent_memory_is_404(store, capability_app):
+    store.update_metadata.return_value = {"updated": False, "reason": "not_found"}
+
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "archive", "memory_id": "gone"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 404
+
+
+def test_retention_action_must_be_one_of_the_three(store, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "delete", "memory_id": "m1"},
+        headers=_ORIGIN,
+    )
+
+    assert resp.status_code == 400
+    assert not store.update_metadata.called
+
+
+def test_retention_write_without_a_memory_id_is_400(store, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/retention", data={"action": "archive"}, headers=_ORIGIN
+    )
+
+    assert resp.status_code == 400
+    assert not store.update_metadata.called
+
+
+def test_cross_origin_retention_write_is_rejected(store, capability_app):
+    resp = _client(capability_app).post(
+        "/dashboard/retention",
+        data={"action": "archive", "memory_id": "m1"},
+        headers={"origin": "https://evil.example"},
+    )
+
+    assert resp.status_code == 403
+    assert not store.update_metadata.called
+
+
+def test_get_on_the_retention_endpoint_is_405(capability_app):
+    assert _client(capability_app).get("/dashboard/retention").status_code == 405
+
+
+def test_page_renders_the_triage_status(capability_app, monkeypatch, triage_on):
+    _install_triage_runner(
+        monkeypatch,
+        _FakeTriageRunner(status=TriageStatus(state="running", total=7, processed=3)),
+    )
+
+    resp = _client(capability_app).get("/dashboard")
+
+    data = _page_data(resp.text)
+    assert data["triage_enabled"] is True
+    assert data["triage"]["state"] == "running"
+    assert (data["triage"]["total"], data["triage"]["processed"]) == (7, 3)
+
+
+def test_page_reports_when_automatic_triage_is_off(capability_app, monkeypatch):
+    monkeypatch.setattr(app_module, "triage_enabled", lambda: False)
+
+    resp = _client(capability_app).get("/dashboard")
+
+    assert _page_data(resp.text)["triage_enabled"] is False
+    assert "Automatic review is off on this server" in resp.text
+
+
+def test_page_carries_each_memorys_retention_state_and_reason(store, capability_app):
+    """An archived memory stays on this page — it is the only place the user
+    can see what was set aside, and why."""
+    store.all.return_value = [
+        {"id": "m1", "memory": "likes dark roast"},
+        {
+            "id": "m2",
+            "memory": "the file was at /tmp/x",
+            "metadata": {
+                "retention_state": "archived",
+                "retention_source": "llm",
+                "retention_reason": "one-off task detail",
+            },
+        },
+    ]
+
+    resp = _client(capability_app).get("/dashboard")
+
+    kept, archived = _page_data(resp.text)["memories"]
+    assert kept["retention"] == {"state": "keep", "by_user": False, "reason": ""}
+    assert archived["retention"] == {
+        "state": "archived",
+        "by_user": False,
+        "reason": "one-off task detail",
+    }

@@ -7,6 +7,11 @@ key per scope, written by the dashboard (VC-87) and eventually the classifier
 (VC-88). See context_layer.consent.tags for the key/provenance shape and why
 it is one scalar key per scope rather than an array.
 
+The same is true of a memory's retention state (VC-94): `retention_state` and
+its provenance arrive out of band from the triage pass or the dashboard, and
+it is the one piece of metadata this module READS as well as writes — `search`
+leaves archived memories out. See context_layer.curation.retention.
+
 --- Tenant isolation (PER-5) --------------------------------------------------
 Isolation currently rests entirely on passing `filters={"user_id": ...}` (or
 the `user_id=` kwarg) through to mem0 on every call. That is a single point of
@@ -35,6 +40,7 @@ from typing import Optional
 from mem0 import Memory
 
 from context_layer.config import build_mem0_config, infer_enabled
+from context_layer.curation.retention import is_archived
 
 
 class TenantIsolationError(ValueError):
@@ -92,6 +98,21 @@ def _as_results(res: object) -> list[dict]:
     return res if isinstance(res, list) else []
 
 
+# Archived memories are dropped from search results after mem0 ranks them, so a
+# search has to ask for more rows than the caller wants. Four times, capped:
+# generous enough that a normally-triaged store still fills the requested limit,
+# bounded so a large `limit` can't turn one search into a scan of the store.
+_OVERFETCH_FACTOR = 4
+_MAX_OVERFETCH = 200
+
+
+def _overfetch(limit: int) -> int:
+    # Never below the caller's own limit: the cap bounds the EXTRA rows, and a
+    # large limit that landed under it would return fewer memories than the
+    # same search did before archiving existed.
+    return max(limit, min(max(limit, 1) * _OVERFETCH_FACTOR, _MAX_OVERFETCH))
+
+
 class ContextStore:
     def __init__(self) -> None:
         self._mem = Memory.from_config(build_mem0_config())
@@ -128,11 +149,48 @@ class ContextStore:
         query: str,
         user_id: Optional[str] = None,
         limit: int = 5,
+        include_archived: bool = False,
     ) -> list[dict]:
-        """Semantic search over a user's memories, newest-relevant first."""
+        """Semantic search over a user's KEPT memories, newest-relevant first.
+
+        Memories archived by triage (VC-94) are left out. This is the whole
+        point of having a retention state: search results are what an
+        assistant builds its answers from, so a memory that was only true for
+        an afternoon should stop competing with the durable ones for the few
+        slots a caller asked for. Archived memories are still in the store,
+        still the user's, and still shown in the dashboard — which reads them
+        through ``all``, not here. ``include_archived`` is for a search that
+        must see everything; nothing asks for that yet, and the reads that
+        will are export (PER-24) and deletion verification (PER-71).
+
+        Filtered HERE rather than in the mem0 query, even though the retention
+        state is a scalar payload key a filter could match, because a filter
+        would have to express "not archived" and a memory with no retention
+        keys at all — every memory written before triage existed, and every
+        one no pass has looked at — is exactly that case. A comparison against
+        an absent key is backend-specific and would silently hide most of a
+        store on the backend that answers "no match"; ``is_archived`` treats
+        an absent state as kept, everywhere.
+
+        The cost is that mem0 must be asked for more rows than the caller
+        wants, since the archived ones are discarded afterwards. In a store
+        where nearly everything is archived that can still return fewer than
+        ``limit`` results — it never returns the wrong ones.
+        """
         user_id = _require_user_id(user_id, op="search memories")
-        res = self._mem.search(query, filters={"user_id": user_id}, top_k=limit)
-        return _as_results(res)
+        if limit < 1:
+            # "No results, please" — answered without a query. Guarded because
+            # the archived rows are dropped by slicing to `limit`, and a
+            # negative one would quietly drop the LAST results instead.
+            return []
+        top_k = limit if include_archived else _overfetch(limit)
+        res = _as_results(
+            self._mem.search(query, filters={"user_id": user_id}, top_k=top_k)
+        )
+        if include_archived:
+            return res
+        kept = [row for row in res if not is_archived(row.get("metadata"))]
+        return kept[:limit]
 
     def all(self, user_id: Optional[str] = None, limit: int = 1000) -> list[dict]:
         """Every memory for a user, up to `limit`.

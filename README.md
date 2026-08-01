@@ -61,11 +61,13 @@ Then [steer each client's instructions](#steer-your-ai-client) so it actually ca
 
 A local stdio setup has no HTTP surface; use `uv run python scripts/inspect_db.py` for the same view in the terminal, or start the server with `MCP_TRANSPORT=streamable-http` and open `http://localhost:8000/dashboard`.
 
-The page reads memories and writes only consent state (scopes and tags). Editing or deleting the memories themselves from the browser is tracked as PER-56 and PER-41.
+The page reads memories and writes only consent state (scopes and tags) and retention state (kept or set aside). Editing or deleting the memories themselves from the browser is tracked as PER-56 and PER-41.
 
 **Suggest scopes from my memories** is where a brand-new account starts. Until some scopes exist there is nothing to tag memories into, so this takes one pass over your store and proposes the categories it sees in it. They arrive as a checklist and only what you tick gets registered — a scope is the thing a future sharing decision is made in, so the vocabulary stays yours to accept or throw away. Everything it registers is your own scope, never one on a connected app's behalf, and a proposal that collides with a scope you already have is dropped rather than overwriting what you wrote there. Like re-tagging below, it needs `EXTRACTION_MODE=anthropic` — in any other mode no memory is sent to a model and the panel says so.
 
 **Re-tag all memories** runs the scope classifier over your whole store in the background and reports progress as you reload; run it after registering or creating scopes, since tags are derived from your memory text and a brand-new scope starts out matching nothing. Tags you set by hand are never overwritten by it, and a tag you removed is never re-applied. The button appears only under `EXTRACTION_MODE=anthropic` — that is the one mode where classification happens at all, and the panel says so otherwise.
+
+**Review my memories** asks one question of each memory in turn — would knowing this change a decision later? — and sets aside the ones that would not: the detail from a task that finished months ago, the thing that was true for an afternoon, the note too vague to act on. Set-aside memories stop coming back from `search_memory`, which is what your AI clients actually build answers from, so the store gets quieter without losing anything: nothing is deleted, everything stays on this page under **set aside** with the reason it was moved there, and **Keep** puts one back. Anything you keep or set aside by hand stays that way — a later run never re-decides it. Like the two passes above it needs `EXTRACTION_MODE=anthropic`, and the buttons on each memory work in any mode.
 
 ## Steer your AI client
 
@@ -95,11 +97,11 @@ Set `EXTRACTION_MODE` in `.env`:
 
 | mode        | what happens on write                              | data leaves machine? |
 |-------------|----------------------------------------------------|----------------------|
-| `anthropic` | Claude extracts & dedups facts (needs API key in `~/.env`) | yes (extraction, and scope classification) |
+| `anthropic` | Claude extracts & dedups facts (needs API key in `~/.env`) | yes (extraction, scope classification, and memory triage) |
 | `ollama`    | a local LLM extracts facts (needs ollama running)  | no                   |
 | `none`      | raw text stored + embedded, no LLM                 | no                   |
 
-Embeddings always run **locally** (fastembed, 384-dim), so retrieval never depends on a cloud provider. The consent-scope classifier follows the same switch: only `anthropic` sends memory text to a model to derive tags, and in the other two modes it never runs, so tagging is by hand.
+Embeddings always run **locally** (fastembed, 384-dim), so retrieval never depends on a cloud provider. The consent-scope classifier and the triage pass follow the same switch: only `anthropic` sends memory text to a model to derive tags or judge what is worth keeping, and in the other two modes neither runs, so tagging and setting memories aside are by hand.
 
 ## Backfill your history
 
@@ -209,7 +211,8 @@ src/context_layer/
   identity/             # resolve_user_id — the tenant seam
   memory/               # ContextStore over mem0: add/search/all/update_metadata/delete/delete_all
   consent/              # per-user consent-scope registry, the cs_* tag vocabulary, and the out-of-band classifier
-  dashboard/            # memory browser + scope/tag manager at /dashboard (AuthKit sign-in on OAuth deploys)
+  curation/             # retention state per memory + the triage pass that keeps the store worth reading
+  dashboard/            # memory browser + scope/tag/retention manager at /dashboard (AuthKit sign-in on OAuth deploys)
   observability/        # access/audit log — one JSON line per tool call or page view
   ingest/               # offline backfill: export parsers → normalized format → batch runner
 scripts/
@@ -243,6 +246,6 @@ uv pip install -e ~/repos/mem0   # re-run `uv sync` to go back to the pinned rel
 
 ## Roadmap
 
-Working today: the memory store with its tenant-isolation guard, the MCP tools, both auth modes, the access log, the memory browser at `/dashboard` with consent-scope and tag management, the out-of-band scope classifier behind it, and backfill from a Claude export.
+Working today: the memory store with its tenant-isolation guard, the MCP tools, both auth modes, the access log, the memory browser at `/dashboard` with consent-scope and tag management, the out-of-band scope classifier behind it, memory triage that sets aside what no longer informs a decision, and backfill from a Claude export.
 
 Next: retire the capability URL now that OAuth carries real traffic (PER-22) and onboard the first friend tenants (PER-23); tenant hygiene — a per-user export endpoint (PER-24), deletion exposed over MCP (PER-57), an erasure receipt (PER-25); a ChatGPT export parser (PER-28) and an idempotent ingest manifest so re-running an import is safe (PER-29); reconciliation, so a changed preference supersedes its old version instead of overwriting it (PER-32, PER-33); then the consent layer — scoped grants, revocation, deletion propagation (PER-16). Details and status live in the Linear project.
