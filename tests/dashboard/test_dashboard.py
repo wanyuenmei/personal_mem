@@ -31,11 +31,10 @@ from context_layer.consent import (
     ScopeSummary,
     SummaryFailed,
     SummaryHolder,
-    SweepStatus,
 )
-from context_layer.curation import TriageStatus
 from context_layer.dashboard import DashboardApp
 from context_layer.dashboard import app as app_module
+from context_layer.jobs import RunStore
 from context_layer.memory import TenantIsolationError
 
 # What a browser sends on a same-origin form POST to the TestClient host.
@@ -67,8 +66,17 @@ def registry(tmp_path):
 
 
 @pytest.fixture
-def capability_app(store, registry):
-    return DashboardApp(_inner_app, store, oauth_mode=False, registry=registry)
+def runs(tmp_path):
+    """A real RunStore over temp SQLite. The sweeps are durable rows now, so a
+    stub of them would test the stub rather than what the page renders."""
+    return RunStore(sqlite_path=str(tmp_path / "runs.db"))
+
+
+@pytest.fixture
+def capability_app(store, registry, runs):
+    return DashboardApp(
+        _inner_app, store, oauth_mode=False, registry=registry, runs=runs
+    )
 
 
 @pytest.fixture
@@ -715,7 +723,7 @@ def test_oauth_post_writes_under_the_signed_in_namespace(
     assert [s.key for s in registry.all(user_id)] == ["journaling__user"]
 
 
-def test_mutations_log_a_dashboard_action(store, registry, capability_app, caplog):
+def test_mutations_log_a_dashboard_action(store, registry, capability_app, caplog, runs):
     _register_dietary(registry)
     caplog.set_level(logging.INFO, logger="context_layer.access")
 
@@ -742,21 +750,27 @@ def _page_data(page: str) -> dict:
     return json.loads(page[start : page.index("</script>", start)])
 
 
-class _FakeRunner:
-    """Stands in for the process-wide SweepRunner: records start() calls and
-    reports whatever status a test wants the page to render."""
+def _seed_run(runs, kind, *, state="done", error="", detail=None, **counters):
+    """Put a run in the store in the state a test needs the page to render.
 
-    def __init__(self, started=True, status=None):
-        self.started = started
-        self._status = status or SweepStatus()
-        self.calls = []
+    Driven through the real lifecycle rather than written behind it, so a test
+    that expects "running" is looking at what a running run actually is.
+    """
+    user = config.DEFAULT_USER_ID
+    runs.enqueue(user, kind)
+    if state == "queued":
+        return
+    runs.claim(runs.claimable()[0])
+    runs.progress(user, kind, detail=detail, **counters)
+    if state in ("done", "error"):
+        runs.finish(user, kind, state=state, error=error, detail=detail)
 
-    def start(self, store, registry, user_id):
-        self.calls.append(user_id)
-        return self.started
 
-    def status(self, user_id):
-        return self._status
+def _queued(runs, kind):
+    """The users this kind has a run pending for — what the old runner's
+    ``calls`` list used to say, read off the store instead."""
+    run = runs.get(config.DEFAULT_USER_ID, kind)
+    return [run.user_id] if run is not None and not run.finished else []
 
 
 @pytest.fixture
@@ -765,37 +779,30 @@ def tagging_on(monkeypatch):
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: True)
 
 
-def _install_runner(monkeypatch, runner):
-    monkeypatch.setattr(app_module, "get_sweep_runner", lambda: runner)
-    return runner
-
-
-def test_sweep_starts_a_background_pass(capability_app, monkeypatch, tagging_on):
-    runner = _install_runner(monkeypatch, _FakeRunner())
+def test_sweep_starts_a_background_pass(capability_app, monkeypatch, tagging_on, runs):
 
     resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "../dashboard"
-    assert runner.calls == [config.DEFAULT_USER_ID]
+    assert _queued(runs, "scope_tagging") == [config.DEFAULT_USER_ID]
 
 
-def test_sweep_is_refused_when_the_classifier_is_off(capability_app, monkeypatch):
+def test_sweep_is_refused_when_the_classifier_is_off(capability_app, monkeypatch, runs):
     """Nothing is sent to a model outside EXTRACTION_MODE=anthropic, so the
     endpoint says so rather than starting a pass that would tag nothing."""
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
-    runner = _install_runner(monkeypatch, _FakeRunner())
 
     resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
 
     assert resp.status_code == 409
-    assert runner.calls == []
+    assert _queued(runs, "scope_tagging") == []
 
 
 def test_a_sweep_already_running_is_logged_not_an_error(
     capability_app, monkeypatch, caplog, tagging_on
-):
-    _install_runner(monkeypatch, _FakeRunner(started=False))
+, runs):
+    runs.enqueue(config.DEFAULT_USER_ID, "scope_tagging")
     caplog.set_level(logging.INFO, logger="context_layer.access")
 
     resp = _client(capability_app).post("/dashboard/sweep", headers=_ORIGIN)
@@ -805,26 +812,22 @@ def test_a_sweep_already_running_is_logged_not_an_error(
     assert json.loads(record.getMessage())["action"] == "sweep_busy"
 
 
-def test_cross_origin_sweep_is_rejected(capability_app, monkeypatch, tagging_on):
-    runner = _install_runner(monkeypatch, _FakeRunner())
+def test_cross_origin_sweep_is_rejected(capability_app, monkeypatch, tagging_on, runs):
 
     resp = _client(capability_app).post(
         "/dashboard/sweep", headers={"origin": "https://evil.example"}
     )
 
     assert resp.status_code == 403
-    assert runner.calls == []
+    assert _queued(runs, "scope_tagging") == []
 
 
 def test_get_on_the_sweep_endpoint_is_405(capability_app):
     assert _client(capability_app).get("/dashboard/sweep").status_code == 405
 
 
-def test_page_renders_the_sweep_status(capability_app, monkeypatch, tagging_on):
-    _install_runner(
-        monkeypatch,
-        _FakeRunner(status=SweepStatus(state="running", total=7, processed=3)),
-    )
+def test_page_renders_the_sweep_status(capability_app, monkeypatch, tagging_on, runs):
+    _seed_run(runs, "scope_tagging", state="running", total=7, processed=3)
 
     resp = _client(capability_app).get("/dashboard")
 
@@ -836,13 +839,11 @@ def test_page_renders_the_sweep_status(capability_app, monkeypatch, tagging_on):
 
 def test_page_carries_the_scope_count_a_sweep_ran_with(
     capability_app, monkeypatch, tagging_on
-):
+, runs):
     """A stored "0 of 0" means one of two things — no scopes to tag into, or a
     pass that matched nothing — so the count travels with the status."""
-    _install_runner(
-        monkeypatch,
-        _FakeRunner(status=SweepStatus(state="done", scope_count=2, total=5, changed=1)),
-    )
+    _seed_run(runs, "scope_tagging", state="done", total=5, changed=1,
+              detail={"scope_count": 2})
 
     data = _page_data(_client(capability_app).get("/dashboard").text)
 
@@ -854,7 +855,6 @@ def test_page_points_at_scope_creation_when_none_are_registered(
 ):
     """With an empty registry a re-tag could only ever be a no-op, so the panel
     leads with the step that unblocks it instead of offering the button."""
-    _install_runner(monkeypatch, _FakeRunner())
 
     resp = _client(capability_app).get("/dashboard")
 
@@ -864,22 +864,14 @@ def test_page_points_at_scope_creation_when_none_are_registered(
 
 def test_page_renders_a_sweep_that_could_not_classify_anything(
     capability_app, monkeypatch, tagging_on
-):
+, runs):
     """A sweep where every classification call failed must reach the page as
     an error with a count, not as "0 of 4 memories updated"."""
-    _install_runner(
-        monkeypatch,
-        _FakeRunner(
-            status=SweepStatus(
-                state="error",
-                total=4,
-                processed=4,
-                failed=4,
-                # The exact value renderSweep branches on to explain the
-                # likely cause (credentials or model config) to the user.
-                error="all_failed",
-            )
-        ),
+    _seed_run(
+        runs, "scope_tagging", state="error", total=4, processed=4, failed=4,
+        # The exact value renderSweep branches on to explain the likely cause
+        # (credentials or model config) to the user.
+        error="all_failed",
     )
 
     data = _page_data(_client(capability_app).get("/dashboard").text)
@@ -890,7 +882,6 @@ def test_page_renders_a_sweep_that_could_not_classify_anything(
 
 def test_page_reports_when_automatic_tagging_is_off(capability_app, monkeypatch):
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
-    _install_runner(monkeypatch, _FakeRunner())
 
     data = _page_data(_client(capability_app).get("/dashboard").text)
 
@@ -1152,7 +1143,6 @@ def test_get_on_the_suggest_endpoint_is_405(capability_app):
 def test_page_renders_pending_proposals_for_ticking(
     capability_app, monkeypatch, holder, tagging_on
 ):
-    _install_runner(monkeypatch, _FakeRunner())
     holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
 
     data = _page_data(_client(capability_app).get("/dashboard").text)
@@ -1165,7 +1155,6 @@ def test_page_renders_pending_proposals_for_ticking(
 def test_page_separates_a_run_that_found_nothing_from_never_having_run_one(
     capability_app, monkeypatch, holder, tagging_on
 ):
-    _install_runner(monkeypatch, _FakeRunner())
 
     before = _page_data(_client(capability_app).get("/dashboard").text)
     holder.put(config.DEFAULT_USER_ID, [])
@@ -1180,7 +1169,6 @@ def test_page_offers_suggestion_when_no_scopes_are_registered(
 ):
     """The cold start: with an empty vocabulary this is the only control on the
     panel that can do anything."""
-    _install_runner(monkeypatch, _FakeRunner())
 
     resp = _client(capability_app).get("/dashboard")
 
@@ -1191,36 +1179,13 @@ def test_page_offers_suggestion_when_no_scopes_are_registered(
 # --- memory triage: the retention endpoint (VC-94) ------------------------
 
 
-class _FakeTriageRunner:
-    """Stands in for the process-wide TriageRunner: records start() calls and
-    reports whatever status a test wants the page to render."""
-
-    def __init__(self, started=True, status=None):
-        self.started = started
-        self._status = status or TriageStatus()
-        self.calls = []
-
-    def start(self, store, user_id):
-        self.calls.append(user_id)
-        return self.started
-
-    def status(self, user_id):
-        return self._status
-
-
 @pytest.fixture
 def triage_on(monkeypatch):
     """A server where triage is configured to run."""
     monkeypatch.setattr(app_module, "triage_enabled", lambda: True)
 
 
-def _install_triage_runner(monkeypatch, runner):
-    monkeypatch.setattr(app_module, "get_triage_runner", lambda: runner)
-    return runner
-
-
-def test_triage_sweep_starts_a_background_pass(capability_app, monkeypatch, triage_on):
-    runner = _install_triage_runner(monkeypatch, _FakeTriageRunner())
+def test_triage_sweep_starts_a_background_pass(capability_app, monkeypatch, triage_on, runs):
 
     resp = _client(capability_app).post(
         "/dashboard/retention", data={"action": "sweep"}, headers=_ORIGIN
@@ -1228,27 +1193,26 @@ def test_triage_sweep_starts_a_background_pass(capability_app, monkeypatch, tria
 
     assert resp.status_code == 303
     assert resp.headers["location"] == "../dashboard"
-    assert runner.calls == [config.DEFAULT_USER_ID]
+    assert _queued(runs, "retention") == [config.DEFAULT_USER_ID]
 
 
 def test_triage_sweep_is_refused_when_no_model_may_be_called(
     capability_app, monkeypatch
-):
+, runs):
     monkeypatch.setattr(app_module, "triage_enabled", lambda: False)
-    runner = _install_triage_runner(monkeypatch, _FakeTriageRunner())
 
     resp = _client(capability_app).post(
         "/dashboard/retention", data={"action": "sweep"}, headers=_ORIGIN
     )
 
     assert resp.status_code == 409
-    assert runner.calls == []
+    assert _queued(runs, "retention") == []
 
 
 def test_a_triage_pass_already_running_is_logged_not_an_error(
     capability_app, monkeypatch, caplog, triage_on
-):
-    _install_triage_runner(monkeypatch, _FakeTriageRunner(started=False))
+, runs):
+    runs.enqueue(config.DEFAULT_USER_ID, "retention")
     caplog.set_level(logging.INFO, logger="context_layer.access")
 
     resp = _client(capability_app).post(
@@ -1369,11 +1333,8 @@ def test_get_on_the_retention_endpoint_is_405(capability_app):
     assert _client(capability_app).get("/dashboard/retention").status_code == 405
 
 
-def test_page_renders_the_triage_status(capability_app, monkeypatch, triage_on):
-    _install_triage_runner(
-        monkeypatch,
-        _FakeTriageRunner(status=TriageStatus(state="running", total=7, processed=3)),
-    )
+def test_page_renders_the_triage_status(capability_app, monkeypatch, triage_on, runs):
+    _seed_run(runs, "retention", state="running", total=7, processed=3)
 
     resp = _client(capability_app).get("/dashboard")
 
@@ -1424,11 +1385,10 @@ def test_page_carries_each_memorys_retention_state_and_reason(store, capability_
 
 def test_approving_scopes_starts_the_tagging_sweep(
     capability_app, registry, monkeypatch, holder, tagging_on
-):
+, runs):
     """Registering a scope tags nothing by itself, so a vocabulary the user
     just approved would otherwise arrive empty."""
     _install_suggester(monkeypatch, None)
-    runner = _install_runner(monkeypatch, _FakeRunner())
     holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
 
     resp = _client(capability_app).post(
@@ -1438,16 +1398,15 @@ def test_approving_scopes_starts_the_tagging_sweep(
     )
 
     assert resp.status_code == 303
-    assert runner.calls == [config.DEFAULT_USER_ID]
+    assert _queued(runs, "scope_tagging") == [config.DEFAULT_USER_ID]
 
 
 def test_approving_nothing_starts_no_sweep(
     capability_app, monkeypatch, holder, tagging_on
-):
+, runs):
     """A confirm that registered no new scope has nothing to re-derive, and a
     sweep is one model call per memory."""
     _install_suggester(monkeypatch, None)
-    runner = _install_runner(monkeypatch, _FakeRunner())
     holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
 
     resp = _client(capability_app).post(
@@ -1455,15 +1414,14 @@ def test_approving_nothing_starts_no_sweep(
     )
 
     assert resp.status_code == 303
-    assert runner.calls == []
+    assert _queued(runs, "scope_tagging") == []
 
 
 def test_approving_a_scope_registered_since_the_proposal_starts_no_sweep(
     capability_app, registry, monkeypatch, holder, tagging_on
-):
+, runs):
     """The collision check already drops it, so nothing changed for tags either."""
     _install_suggester(monkeypatch, None)
-    runner = _install_runner(monkeypatch, _FakeRunner())
     registry.register(
         config.DEFAULT_USER_ID, owner_type="user", owner_slug=RESERVED_OWNER_SLUG,
         scopes=[("travel", "mine, written by hand")],
@@ -1477,16 +1435,15 @@ def test_approving_a_scope_registered_since_the_proposal_starts_no_sweep(
     )
 
     assert resp.status_code == 303
-    assert runner.calls == []
+    assert _queued(runs, "scope_tagging") == []
 
 
 def test_approving_scopes_without_a_model_registers_but_starts_nothing(
     capability_app, registry, monkeypatch, holder
-):
+, runs):
     """Confirm must still work where no model may be called — it just has no
     classifier to fill the scopes with."""
     monkeypatch.setattr(app_module, "classifier_enabled", lambda: False)
-    runner = _install_runner(monkeypatch, _FakeRunner())
     holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
 
     resp = _client(capability_app).post(
@@ -1497,18 +1454,18 @@ def test_approving_scopes_without_a_model_registers_but_starts_nothing(
 
     assert resp.status_code == 303
     assert [s.key for s in registry.all(config.DEFAULT_USER_ID)] == ["travel__user"]
-    assert runner.calls == []
+    assert _queued(runs, "scope_tagging") == []
 
 
 def test_approving_scopes_while_a_sweep_runs_is_not_an_error(
     capability_app, registry, monkeypatch, holder, caplog, tagging_on
-):
+, runs):
     """That pass started against the older vocabulary, so the scopes may go
     untagged — the re-tag button is still there, and a refused start must not
     turn approving them into a failure. It is logged as busy either way, so
     "the scopes I approved are still empty" has an answer in the log."""
     _install_suggester(monkeypatch, None)
-    _install_runner(monkeypatch, _FakeRunner(started=False))
+    runs.enqueue(config.DEFAULT_USER_ID, "scope_tagging")
     holder.put(config.DEFAULT_USER_ID, [_proposal("travel")])
     caplog.set_level(logging.INFO, logger="context_layer.access")
 

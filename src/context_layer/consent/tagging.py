@@ -2,11 +2,12 @@
 
 Two entry points, one reconcile rule:
 
-- :class:`SweepRunner` — the user-triggered full re-sweep, from the
-  dashboard's POST /dashboard/sweep. Walks every memory on a background thread and
-  publishes progress the page can render. This is also the rebuild path after
-  any vocabulary change: scopes have no history, so re-deriving from the text
-  is the only way tags catch up with a newly registered scope.
+- :class:`ScopeTaggingHandler` — the user-triggered full re-sweep, enqueued
+  by the dashboard's POST /dashboard/sweep and executed by the job worker as a
+  durable run, so a deploy mid-pass resumes instead of starting over (VC-98).
+  This is also the rebuild path after any vocabulary change: scopes have no
+  history, so re-deriving from the text is the only way tags catch up with a
+  newly registered scope.
 - :func:`tag_new_memories` — the on-write pass. ``add_memory`` fires it on a
   daemon thread and returns immediately; a classifier failure or a slow API
   call can never fail or delay the write that triggered it.
@@ -23,7 +24,7 @@ cannot remove keys).
 
 import logging
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional, Sequence
 
@@ -35,14 +36,30 @@ from context_layer.consent.tags import (
     USER_OWNED_PROVENANCES,
     tag_key,
 )
+from context_layer.jobs.runs import fingerprint_of
+from context_layer.jobs.worker import Pass
 
 logger = logging.getLogger("context_layer.consent.tagging")
 
-# SweepStatus.error when every memory in a sweep failed on its own — the one
-# failure mode with a user-facing explanation rather than an exception type
-# name, because it is nearly always credentials or model configuration. The
-# dashboard branches on this exact value to render that explanation.
-SWEEP_ERROR_ALL_FAILED = "all_failed"
+# Records which vocabulary a memory was last classified against. Deliberately
+# NOT under the ``cs_`` prefix: everything there is a scope tag with a
+# provenance value, and a key that looked like one but held a hash would be a
+# trap for the next person reading a payload — even though ``active_tags``
+# would filter it out today.
+SWEPT_KEY = "scope_swept_fp"
+
+
+def scope_fingerprint(scopes: Sequence[ConsentScope]) -> str:
+    """What "already classified" means, as a hash of the whole vocabulary.
+
+    Descriptions are in it, not just keys: the classifier puts them in the
+    prompt, so editing one can change which memories a scope claims and every
+    memory is owed a re-think. Sorted, so the same vocabulary hashes the same
+    however the registry happened to return it.
+    """
+    return fingerprint_of(
+        *sorted(f"{scope.key}={scope.description}" for scope in scopes)
+    )
 
 
 def _now() -> str:
@@ -103,6 +120,33 @@ class TagCounts:
     failed: int = 0
 
 
+def tag_one(
+    store,
+    user_id: str,
+    row: dict,
+    scopes: Sequence[ConsentScope],
+    fingerprint: str,
+) -> bool:
+    """Classify one memory and write its tags. True if a tag actually changed.
+
+    The write always happens when there is something to classify, even when no
+    tag changed, because it also carries the stamp saying which vocabulary this
+    memory has now been judged against. That stamp is what lets the next pass
+    skip it instead of paying for the same answer again — one metadata write
+    now against one model call every future sweep.
+
+    Raises whatever the classifier or the store raised. Callers count the
+    failure and move on: one unreachable memory must not end a pass.
+    """
+    memory_id = str(row.get("id") or "")
+    text = str(row.get("memory") or row.get("text") or "")
+    if not memory_id or not text:
+        return False
+    changes = tag_updates(row.get("metadata"), scopes, classify(text, scopes))
+    store.update_metadata(memory_id, {**changes, SWEPT_KEY: fingerprint}, user_id)
+    return bool(changes)
+
+
 def tag_rows(
     store,
     user_id: str,
@@ -113,24 +157,28 @@ def tag_rows(
 ) -> TagCounts:
     """Classify and tag each row; returns what changed and what failed.
 
+    The on-write path's loop. The full sweep no longer comes through here — it
+    is a durable run the job worker walks (see ``jobs.worker``), so that it can
+    survive the process it started in — but a handful of just-written memories
+    are worth doing inline on the thread that already has them.
+
     One memory's failure — a classification call that failed, a write that
     lost a race with a delete — is logged and counted rather than abandoning
-    the rest of the sweep.
+    the rest.
     """
+    fingerprint = scope_fingerprint(scopes)
     changed = 0
     failed = 0
     for row in rows:
-        memory_id = str(row.get("id") or "")
-        text = str(row.get("memory") or row.get("text") or "")
         try:
-            if memory_id and text:
-                updates = tag_updates(row.get("metadata"), scopes, classify(text, scopes))
-                if updates:
-                    store.update_metadata(memory_id, updates, user_id)
-                    changed += 1
+            if tag_one(store, user_id, row, scopes, fingerprint):
+                changed += 1
         except Exception:
             failed += 1
-            logger.exception("failed to tag memory %r for user=%s", memory_id, user_id)
+            logger.exception(
+                "failed to tag memory %r for user=%s",
+                str(row.get("id") or ""), user_id,
+            )
         if on_progress is not None:
             on_progress()
     return TagCounts(changed=changed, failed=failed)
@@ -139,136 +187,53 @@ def tag_rows(
 # --- the user-triggered full sweep ----------------------------------------
 
 
-@dataclass
-class SweepStatus:
-    """What the dashboard shows about a user's sweep.
+class ScopeTaggingHandler:
+    """What a scope-tagging run is, for the job worker that executes it.
 
-    In-process and deliberately not persisted: it describes a running thread
-    in THIS worker, and a restart genuinely has no sweep running. Losing it
-    costs nothing — the sweep is re-runnable at will and converges to the same
-    tags.
-
-    ``error`` carries either the exception type that ended the whole sweep or
-    ``SWEEP_ERROR_ALL_FAILED`` when every memory failed individually. The
-    second is why ``failed`` exists: a sweep where every classification call
-    was rejected used to finish as "done, 0 of N updated", indistinguishable
-    from a store where nothing needed tagging.
+    The sweep used to be a thread this module owned. It is now a durable run
+    (see ``jobs.runs``) and this is only the part that is specific to tagging:
+    what the pass is judging against, which memories it covers, which are
+    already current, and what doing one means. Everything else — claiming the
+    run, heartbeating, counting, resuming it after the process died — belongs
+    to the worker and is the same for every kind of pass.
     """
 
-    state: str = "idle"  # idle | running | done | error
-    # How many scopes the pass had to sort into: zero is "no categories to
-    # classify into", which otherwise reads identically to a real pass that
-    # matched nothing (both are 0 of 0). A count rather than a second terminal
-    # state because ``state`` is the lifecycle and this is a fact about the
-    # input — and because it stays true of a STORED result once the user does
-    # register scopes, where a "no_scopes" state would have to be reread.
-    scope_count: int = 0
-    total: int = 0
-    processed: int = 0
-    changed: int = 0
-    failed: int = 0
-    started_at: str = ""
-    finished_at: str = ""
-    error: str = ""
+    kind = "scope_tagging"
 
-    def as_dict(self) -> dict:
-        return asdict(self)
+    def __init__(self, registry: ScopeRegistry) -> None:
+        self._registry = registry
 
+    def prepare(self, store, user_id: str) -> Pass:
+        """Read the vocabulary ONCE, and settle the whole attempt against it.
 
-class SweepRunner:
-    """Per-user sweep threads plus the status the page renders.
+        Not once per row: the registry opens a connection per call, so
+        re-reading would add a round trip per memory. More importantly it would
+        make the pass incoherent — a scope registered halfway through would be
+        tagged onto later memories while every one of them is stamped with the
+        fingerprint of the vocabulary as it was at the start.
 
-    At most one sweep per user at a time: a second POST while one is running
-    is a no-op rather than a second full pass over the store (the button is
-    one click, and an impatient user shouldn't be able to multiply the API
-    calls). Statuses are keyed by user id so one tenant's sweep is never
-    visible to — or blocked by — another's.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._statuses: dict[str, SweepStatus] = {}
-
-    def status(self, user_id: str) -> SweepStatus:
-        with self._lock:
-            return self._statuses.get(user_id) or SweepStatus()
-
-    def is_running(self, user_id: str) -> bool:
-        return self.status(user_id).state == "running"
-
-    def start(self, store, registry: ScopeRegistry, user_id: str) -> bool:
-        """Kick off a sweep; False if one is already running for this user.
-
-        Claims the slot under the lock before the thread starts, so two
-        near-simultaneous POSTs can't both see "idle" and both spawn.
+        With no vocabulary there are no rows. Tags ARE scopes: a pass could
+        only ever decide "nothing applies" for every memory, at the price of a
+        model call each. The run still completes, reporting the zero scopes it
+        had to sort into — which is what tells the page to say so rather than
+        claim a clean sweep (VC-90).
         """
-        with self._lock:
-            existing = self._statuses.get(user_id)
-            if existing is not None and existing.state == "running":
-                return False
-            self._statuses[user_id] = SweepStatus(state="running", started_at=_now())
-        thread = threading.Thread(
-            target=self._run,
-            args=(store, registry, user_id),
-            name=f"scope-sweep-{user_id}",
-            daemon=True,
+        scopes = self._registry.all(user_id)
+        return Pass(
+            fingerprint=scope_fingerprint(scopes),
+            rows=store.all(user_id) if scopes else [],
+            # A fact about the input rather than the outcome, so it is known
+            # before row one and stays true of a stored result afterwards.
+            detail={"scope_count": len(scopes)},
+            context=scopes,
         )
-        thread.start()
-        return True
 
-    def _update(self, user_id: str, **fields) -> None:
-        with self._lock:
-            status = self._statuses.get(user_id)
-            if status is None:
-                return
-            for name, value in fields.items():
-                setattr(status, name, value)
+    def is_current(self, row: dict, fingerprint: str) -> bool:
+        return (row.get("metadata") or {}).get(SWEPT_KEY) == fingerprint
 
-    def _bump_processed(self, user_id: str) -> None:
-        with self._lock:
-            status = self._statuses.get(user_id)
-            if status is not None:
-                status.processed += 1
-
-    def _run(self, store, registry: ScopeRegistry, user_id: str) -> None:
-        try:
-            scopes = registry.all(user_id)
-            rows = store.all(user_id) if scopes else []
-            self._update(user_id, scope_count=len(scopes), total=len(rows))
-            counts = tag_rows(
-                store,
-                user_id,
-                scopes,
-                rows,
-                on_progress=lambda: self._bump_processed(user_id),
-            )
-            # Every memory failing is a broken classifier, not a sweep with
-            # nothing to do; anything less still reports what did land.
-            everything_failed = bool(rows) and counts.failed == len(rows)
-            self._update(
-                user_id,
-                state="error" if everything_failed else "done",
-                changed=counts.changed,
-                failed=counts.failed,
-                error=SWEEP_ERROR_ALL_FAILED if everything_failed else "",
-                finished_at=_now(),
-            )
-        except Exception as exc:
-            logger.exception("scope sweep failed for user=%s", user_id)
-            self._update(
-                user_id,
-                state="error",
-                error=type(exc).__name__,
-                finished_at=_now(),
-            )
-
-
-_sweeps = SweepRunner()
-
-
-def get_sweep_runner() -> SweepRunner:
-    """The process-wide sweep runner the dashboard starts and reads."""
-    return _sweeps
+    def handle(self, store, user_id: str, row: dict, plan: Pass):
+        changed = tag_one(store, user_id, row, plan.context, plan.fingerprint)
+        return {"changed": 1} if changed else {}
 
 
 # --- the on-write pass -----------------------------------------------------

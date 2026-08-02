@@ -51,17 +51,31 @@ def build_asgi_app(mcp):
     # Imported here, not at module top: importing the tools module constructs
     # the process-wide ContextStore (embedder and all), which nothing should
     # pay for just by importing the transport layer.
+    from context_layer.consent import ScopeTaggingHandler
+    from context_layer.curation import RetentionHandler
     from context_layer.dashboard import DashboardApp
+    from context_layer.jobs import RunStore, SweepWorker
     from context_layer.tools.consent_tools import get_registry
     from context_layer.tools.memory_tools import get_store
 
+    store, registry = get_store(), get_registry()
+    runs = RunStore.from_config()
+    # The worker that actually executes sweeps, started here because this is
+    # where the process owns a store to sweep. It picks up runs the dashboard
+    # enqueues and, on boot, any run a previous process was killed
+    # mid-pass — which is the whole point of the runs being rows (VC-98).
+    SweepWorker(
+        runs, store, [ScopeTaggingHandler(registry), RetentionHandler()]
+    ).start()
+
     inner = DashboardApp(
         mcp.streamable_http_app(),
-        get_store(),
+        store,
         oauth_mode=workos_enabled(),
         # The same registry instance register_scopes writes to, so the page
         # shows a party's vocabulary the moment it registers.
-        registry=get_registry(),
+        registry=registry,
+        runs=runs,
     )
     if workos_enabled():
         guarded = RateLimitGuard(inner, RATE_LIMIT_RPM)
